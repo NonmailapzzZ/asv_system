@@ -1,21 +1,23 @@
 """
-database.py — จัดการ SQLite สำหรับ ASV Data Fusion System
-ตาราง: asv_logs (id, timestamp, lat, lon, depth, ph, do, temp)
+database.py — SQLite management for ASV
 """
-
 import sqlite3
 import csv
 import os
 from datetime import datetime
 
-DB_PATH  = os.path.join(os.path.dirname(__file__), 'logs', 'asv_data.db')
-CSV_PATH = os.path.join(os.path.dirname(__file__), 'logs', 'asv_export.csv')
+DB_PATH = 'logs/asv_data.db'
+CSV_DIR = 'logs'
 
+def get_connection():
+    os.makedirs(os.path.dirname(DB_PATH) or '.', exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    """สร้างตารางถ้ายังไม่มี"""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    os.makedirs(CSV_DIR, exist_ok=True)
+    with get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS asv_logs (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,71 +26,40 @@ def init_db():
                 lon       REAL    DEFAULT 0.0,
                 depth     REAL    DEFAULT 0.0,
                 ph        REAL    DEFAULT 0.0,
-                do_val    REAL    DEFAULT 0.0,
+                do        REAL    DEFAULT 0.0,
                 temp      REAL    DEFAULT 0.0
             )
         """)
         conn.commit()
-    print(f"[DB] Initialized: {DB_PATH}")
-
+    print("[DB] Database initialized")
 
 def insert_record(lat, lon, depth, ph, do_val, temp):
-    """บันทึกข้อมูล fused record 1 แถว"""
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""
-                INSERT INTO asv_logs (timestamp, lat, lon, depth, ph, do_val, temp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (ts, lat, lon, depth, ph, do_val, temp))
-            conn.commit()
-    except Exception as e:
-        print(f"[DB] Insert error: {e}")
+    ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO asv_logs (timestamp, lat, lon, depth, ph, do, temp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (ts, lat, lon, depth, ph, do_val, temp))
+        conn.commit()
 
-
-def get_recent(limit=100):
-    """ดึงข้อมูลล่าสุด N แถว (สำหรับ chart)"""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
-                SELECT * FROM asv_logs ORDER BY id DESC LIMIT ?
-            """, (limit,)).fetchall()
-            return [dict(r) for r in reversed(rows)]
-    except Exception as e:
-        print(f"[DB] Query error: {e}")
-        return []
-
+def get_recent(limit=50):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM asv_logs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in reversed(rows)]
 
 def export_csv():
-    """Export ทุกแถวเป็น CSV แล้วคืน path"""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM asv_logs ORDER BY id").fetchall()
-        with open(CSV_PATH, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['id', 'timestamp', 'lat', 'lon', 'depth', 'ph', 'do', 'temp'])
-            for r in rows:
-                writer.writerow([r['id'], r['timestamp'], r['lat'], r['lon'],
-                                  r['depth'], r['ph'], r['do_val'], r['temp']])
-        print(f"[DB] Exported {len(rows)} rows → {CSV_PATH}")
-        return CSV_PATH
-    except Exception as e:
-        print(f"[DB] Export error: {e}")
-        return None
-
-
-def get_stats():
-    """สถิติรวมสำหรับแสดงบน dashboard"""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute("""
-                SELECT COUNT(*) as total,
-                       MIN(timestamp) as first,
-                       MAX(timestamp) as last
-                FROM asv_logs
-            """).fetchone()
-            return {'total': row[0], 'first': row[1], 'last': row[2]}
-    except Exception:
-        return {'total': 0, 'first': None, 'last': None}
+    os.makedirs(CSV_DIR, exist_ok=True)
+    filename = f"asv_log_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    filepath = os.path.join(CSV_DIR, filename)
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM asv_logs ORDER BY id ASC").fetchall()
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['id','timestamp','lat','lon','depth','ph','do','temp'])
+        for r in rows:
+            writer.writerow([r['id'],r['timestamp'],r['lat'],r['lon'],
+                             r['depth'],r['ph'],r['do'],r['temp']])
+    print(f"[DB] Exported {len(rows)} records -> {filepath}")
+    return filepath

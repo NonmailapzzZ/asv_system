@@ -1,0 +1,82 @@
+const MAX_POINTS = 50;
+const chartData = {
+  labels: [], depth: [], ph: [], do: []
+};
+
+function makeDataset(label, color, data) {
+  return {
+    label, data,
+    borderColor: color,
+    backgroundColor: color + '18',
+    tension: 0.4,
+    pointRadius: 0,
+    borderWidth: 2,
+    fill: true,
+  };
+}
+
+const commonOptions = (unit) => ({
+  responsive: true,
+  animation: { duration: 250 },
+  interaction: { mode: 'index', intersect: false },
+  plugins: { legend: { display: false } },
+  scales: {
+    x: {
+      ticks: { color: '#4a7a85', font: { family: 'Share Tech Mono', size: 10 }, maxTicksLimit: 8 },
+      grid: { color: 'rgba(0,200,255,0.05)' }
+    },
+    y: {
+      ticks: { color: '#4a7a85', font: { family: 'Share Tech Mono', size: 10 },
+               callback: v => v.toFixed(1) + ' ' + unit },
+      grid: { color: 'rgba(0,200,255,0.05)' }
+    }
+  }
+});
+
+const depthChart = new Chart(document.getElementById('chart-depth'), {
+  type: 'line',
+  data: { labels: chartData.labels, datasets: [makeDataset('Depth (m)', '#00d4ff', chartData.depth)] },
+  options: commonOptions('m')
+});
+
+const phChart = new Chart(document.getElementById('chart-ph'), {
+  type: 'line',
+  data: { labels: chartData.labels, datasets: [makeDataset('pH', '#ff6eb4', chartData.ph)] },
+  options: commonOptions('')
+});
+
+const doChart = new Chart(document.getElementById('chart-do'), {
+  type: 'line',
+  data: { labels: chartData.labels, datasets: [makeDataset('DO (mg/L)', '#00ff9d', chartData.do)] },
+  options: commonOptions('mg/L')
+});
+
+export function pushPoint(ts, depth, ph, doVal) {
+  chartData.labels.push(ts);
+  chartData.depth.push(depth);
+  chartData.ph.push(ph);
+  chartData.do.push(doVal);
+
+  if (chartData.labels.length > MAX_POINTS) {
+    chartData.labels.shift();
+    chartData.depth.shift();
+    chartData.ph.shift();
+    chartData.do.shift();
+  }
+
+  depthChart.update('none');
+  phChart.update('none');
+  doChart.update('none');
+}
+
+export function loadHistory(records) {
+  records.forEach(r => {
+    chartData.labels.push(r.timestamp.slice(11, 19));
+    chartData.depth.push(r.depth);
+    chartData.ph.push(r.ph);
+    chartData.do.push(r.do);
+  });
+  depthChart.update();
+  phChart.update();
+  doChart.update();
+}

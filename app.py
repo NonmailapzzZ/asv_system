@@ -1,138 +1,126 @@
 """
-app.py — สมองหลัก ASV Data Fusion System
-Thread A: MAVLink (Pixhawk) → GPS + Depth
-Thread B: Serial  (Arduino) → pH + DO + Temp
-Data Fusion → SQLite ทุก 2 วินาที + WebSocket broadcast
+app.py — ASV System Main Flask Application
+สมองหลักสำหรับระบบ Autonomous Surface Vehicle
+
+Thread A: MAVLink (Pixhawk)
+Thread B: Arduino Serial (pH, DO, Temp)
+Thread C: Data Fusion + SQLite + WebSocket
+
+ติดตั้ง:
+    pip install flask flask-socketio pymavlink pyserial eventlet opencv-python-headless
+
+รัน:
+    python3 app.py
 """
 
-import os
-import time
-import json
-import threading
-import serial
-import serial.tools.list_ports
-from flask import Flask, render_template, send_file, jsonify, request
+import os, time, json, threading, serial, serial.tools.list_ports, random, math
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify, send_file, Response
 from flask_socketio import SocketIO
 from pymavlink import mavutil
 
-import database
-import mission_manager
+import database as db
+import mission_manager as mm
+from camera import camera_manager
 
 # ---------------------------------------------------------------------------
-# การตั้งค่า — แก้ให้ตรงกับเครื่อง
+# CONFIG
 # ---------------------------------------------------------------------------
-PIXHAWK_PORT   = '/dev/ttyACM0'    # Pixhawk USB
+PIXHAWK_PORT   = '/dev/ttyACM0'
 PIXHAWK_BAUD   = 115200
-ARDUINO_PORT   = '/dev/ttyUSB0'    # Arduino Mega USB
 ARDUINO_BAUD   = 9600
-FLASK_PORT     = 5000
-FUSION_INTERVAL = 2.0              # วินาที ระหว่างบันทึก DB
-
-# เปลี่ยนเป็น True เพื่อจำลองข้อมูลโดยไม่ต้องต่อ hardware
-SIM_MAVLINK  = False
-SIM_ARDUINO  = False
+FUSION_INTERVAL = 2.0
+USE_SIM        = True  # True = จำลอง, False = hardware จริง
 # ---------------------------------------------------------------------------
 
-app     = Flask(__name__)
+app = Flask(__name__, template_folder='dashboard', static_folder='dashboard')
 app.config['SECRET_KEY'] = 'asv-secret-2024'
-app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
-socketio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins='*', async_mode='eventlet')
 
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-# ---- Global fused state ----
-fused = {
+lock = threading.Lock()
+state = {
     'lat': 0.0, 'lon': 0.0, 'depth': 0.0,
+    'pixhawk_ok': False,
     'ph': 0.0, 'do': 0.0, 'temp': 0.0,
-    'ts': '--',
-    'mav_ok': False, 'ard_ok': False,
+    'arduino_ok': False,
+    'ts': '',
 }
-fused_lock = threading.Lock()
-
-# MAVLink connection (shared กับ mission_manager)
-mav_master = None
-
 
 # ---------------------------------------------------------------------------
-# THREAD A — MAVLink (Pixhawk)
+# THREAD A — MAVLink
 # ---------------------------------------------------------------------------
-def thread_mavlink():
-    global mav_master, fused
-
-    import random  # สำหรับ simulation
-
-    if SIM_MAVLINK:
-        print("[MAV] Simulation mode")
-        while True:
-            with fused_lock:
-                fused['lat']   = round(13.7563 + random.uniform(-0.001, 0.001), 6)
-                fused['lon']   = round(100.5018 + random.uniform(-0.001, 0.001), 6)
-                fused['depth'] = round(random.uniform(1.0, 8.0), 2)
-                fused['mav_ok'] = True
-            time.sleep(1)
-        return
-
+def mavlink_thread():
+    global state
     while True:
+        master = None
         try:
-            print(f"[MAV] Connecting {PIXHAWK_PORT} @ {PIXHAWK_BAUD}...")
-            mav_master = mavutil.mavlink_connection(PIXHAWK_PORT, baud=PIXHAWK_BAUD)
-            mav_master.wait_heartbeat(timeout=15)
-            print(f"[MAV] Heartbeat! Sys={mav_master.target_system}")
+            print(f"[MAV] Connecting to Pixhawk on {PIXHAWK_PORT}...")
+            master = mavutil.mavlink_connection(PIXHAWK_PORT, baud=PIXHAWK_BAUD)
+            master.wait_heartbeat(timeout=15)
+            print(f"[MAV] Heartbeat! sys={master.target_system}")
+
+            master.mav.request_data_stream_send(
+                master.target_system, master.target_component,
+                mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
+            )
+
+            with lock:
+                state['pixhawk_ok'] = True
 
             while True:
-                msg = mav_master.recv_match(
+                msg = master.recv_match(
                     type=['GLOBAL_POSITION_INT', 'DISTANCE_SENSOR', 'VFR_HUD'],
                     blocking=True, timeout=3
                 )
-                if msg is None:
+                if not msg:
                     continue
 
-                t = msg.get_type()
-                with fused_lock:
-                    fused['mav_ok'] = True
-                    if t == 'GLOBAL_POSITION_INT':
-                        # MAVLink ส่ง lat/lon เป็น int × 1e7
-                        fused['lat'] = msg.lat / 1e7
-                        fused['lon'] = msg.lon / 1e7
-                    elif t == 'DISTANCE_SENSOR':
-                        # Garmin ส่ง depth มาใน cm → แปลงเป็น m
-                        fused['depth'] = round(msg.current_distance / 100.0, 2)
-                    elif t == 'VFR_HUD':
-                        # fallback ถ้า DISTANCE_SENSOR ไม่มี
-                        if fused['depth'] == 0.0:
-                            fused['depth'] = round(abs(msg.alt), 2)
+                with lock:
+                    if msg.get_type() == 'GLOBAL_POSITION_INT':
+                        state['lat'] = msg.lat / 1e7
+                        state['lon'] = msg.lon / 1e7
+
+                    elif msg.get_type() == 'DISTANCE_SENSOR':
+                        state['depth'] = round(msg.current_distance / 100.0, 2)
+
+                    elif msg.get_type() == 'VFR_HUD':
+                        if state['depth'] == 0.0:
+                            state['depth'] = round(abs(msg.alt), 2)
 
         except Exception as e:
             print(f"[MAV] Error: {e} — retry in 5s")
-            with fused_lock:
-                fused['mav_ok'] = False
+            with lock:
+                state['pixhawk_ok'] = False
             time.sleep(5)
 
-
 # ---------------------------------------------------------------------------
-# THREAD B — Arduino Serial (pH, DO, Temp)
+# THREAD B — Arduino
 # ---------------------------------------------------------------------------
-def thread_arduino():
-    global fused
+def find_arduino_port():
+    for p in serial.tools.list_ports.comports():
+        if 'Arduino' in (p.description or '') or 'CH340' in (p.description or '') \
+                or 'ttyUSB' in (p.device or ''):
+            return p.device
+    return None
 
-    import random  # สำหรับ simulation
-
-    if SIM_ARDUINO:
-        print("[ARD] Simulation mode")
-        while True:
-            with fused_lock:
-                fused['ph']   = round(random.uniform(6.5, 8.5), 2)
-                fused['do']   = round(random.uniform(5.0, 9.0), 2)
-                fused['temp'] = round(random.uniform(25.0, 33.0), 2)
-                fused['ard_ok'] = True
-            time.sleep(1)
-        return
-
+def arduino_thread():
+    global state
     while True:
+        port = find_arduino_port()
+        if not port:
+            print("[ARD] Arduino not found — retry in 5s")
+            with lock:
+                state['arduino_ok'] = False
+            time.sleep(5)
+            continue
+
         try:
-            print(f"[ARD] Connecting {ARDUINO_PORT} @ {ARDUINO_BAUD}...")
-            ser = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=3)
-            print("[ARD] Arduino connected")
+            print(f"[ARD] Connecting to Arduino on {port}...")
+            ser = serial.Serial(port, ARDUINO_BAUD, timeout=2)
+            time.sleep(2)
+            print(f"[ARD] Connected to {port}")
+            with lock:
+                state['arduino_ok'] = True
 
             while True:
                 line = ser.readline().decode('utf-8', errors='ignore').strip()
@@ -140,129 +128,178 @@ def thread_arduino():
                     continue
                 try:
                     data = json.loads(line)
-                    with fused_lock:
-                        fused['ph']     = round(float(data.get('ph',   fused['ph'])),   2)
-                        fused['do']     = round(float(data.get('do',   fused['do'])),   2)
-                        fused['temp']   = round(float(data.get('temp', fused['temp'])), 2)
-                        fused['ard_ok'] = True
-                except json.JSONDecodeError:
-                    pass  # บรรทัดที่ยังไม่สมบูรณ์ — รอบรรทัดถัดไป
+                    with lock:
+                        state['ph']   = round(float(data.get('ph',   state['ph'])),   2)
+                        state['do']   = round(float(data.get('do',   state['do'])),   2)
+                        state['temp'] = round(float(data.get('temp', state['temp'])), 2)
+                except (json.JSONDecodeError, ValueError):
+                    pass
 
-        except serial.SerialException as e:
-            print(f"[ARD] Serial error: {e} — retry in 5s")
-            with fused_lock:
-                fused['ard_ok'] = False
-            time.sleep(5)
         except Exception as e:
-            print(f"[ARD] Unexpected error: {e}")
+            print(f"[ARD] Error: {e} — retry in 5s")
+            with lock:
+                state['arduino_ok'] = False
             time.sleep(5)
 
-
 # ---------------------------------------------------------------------------
-# THREAD C — Data Fusion (บันทึก DB + Broadcast SocketIO)
+# THREAD C — Data Fusion
 # ---------------------------------------------------------------------------
-def thread_fusion():
+def fusion_thread():
     while True:
         time.sleep(FUSION_INTERVAL)
-        with fused_lock:
-            snap = fused.copy()
-            snap['ts'] = time.strftime('%H:%M:%S')
-            fused['ts'] = snap['ts']
+        with lock:
+            snap = dict(state)
+            snap['ts'] = datetime.utcnow().strftime('%H:%M:%S')
+            state['ts'] = snap['ts']
 
-        # บันทึก DB
-        database.insert_record(
-            snap['lat'], snap['lon'], snap['depth'],
-            snap['ph'],  snap['do'], snap['temp']
-        )
+        try:
+            db.insert_record(
+                snap['lat'], snap['lon'], snap['depth'],
+                snap['ph'],  snap['do'],  snap['temp']
+            )
+        except Exception as e:
+            print(f"[FUSION] DB error: {e}")
 
-        # broadcast ไปยัง browser ทุก client
         socketio.emit('sensor_update', snap)
 
+# ---------------------------------------------------------------------------
+# SIM MODE
+# ---------------------------------------------------------------------------
+def sim_thread():
+    t = 0
+    while True:
+        t += 1
+        with lock:
+            state['lat']       = 13.7563 + (t * 0.0001)
+            state['lon']       = 100.5018 + (t * 0.0001)
+            state['depth']     = round(2.0 + math.sin(t * 0.1) * 1.5, 2)
+            state['ph']        = round(7.0 + math.sin(t * 0.05) * 0.4, 2)
+            state['do']        = round(6.5 + math.sin(t * 0.08) * 1.0, 2)
+            state['temp']      = round(28.0 + math.sin(t * 0.03) * 2.0, 2)
+            state['pixhawk_ok'] = True
+            state['arduino_ok'] = True
+            state['ts']        = datetime.utcnow().strftime('%H:%M:%S')
+
+        socketio.emit('sensor_update', dict(state))
+        try:
+            db.insert_record(
+                state['lat'], state['lon'], state['depth'],
+                state['ph'],  state['do'],  state['temp']
+            )
+        except Exception as e:
+            print(f"[SIM] DB error: {e}")
+        time.sleep(FUSION_INTERVAL)
 
 # ---------------------------------------------------------------------------
-# Flask Routes
+# FLASK ROUTES
 # ---------------------------------------------------------------------------
 @app.route('/')
 def index():
     return render_template('index.html')
 
-
-@app.route('/api/status')
-def api_status():
-    with fused_lock:
-        return jsonify(fused.copy())
-
-
 @app.route('/api/history')
 def api_history():
-    limit = int(request.args.get('limit', 50))
-    return jsonify(database.get_recent(limit))
+    return jsonify(db.get_recent(50))
 
-
-@app.route('/api/stats')
-def api_stats():
-    return jsonify(database.get_stats())
-
-
-@app.route('/api/mission/status')
-def api_mission_status():
-    return jsonify(mission_manager.mission_status)
-
-
-@app.route('/api/mission/upload', methods=['POST'])
-def api_mission_upload():
+@app.route('/api/upload_mission', methods=['POST'])
+def upload_mission():
     if 'file' not in request.files:
-        return jsonify({'ok': False, 'error': 'ไม่มีไฟล์'}), 400
+        return jsonify({'ok': False, 'msg': 'ไม่มีไฟล์'}), 400
+
     f = request.files['file']
     if not f.filename.endswith('.waypoints'):
-        return jsonify({'ok': False, 'error': 'ต้องเป็นไฟล์ .waypoints'}), 400
+        return jsonify({'ok': False, 'msg': 'ต้องเป็นไฟล์ .waypoints'}), 400
 
-    path = os.path.join(app.config['UPLOAD_FOLDER'], f.filename)
+    path = f'uploads/{f.filename}'
+    os.makedirs('uploads', exist_ok=True)
     f.save(path)
 
     try:
-        waypoints = mission_manager.parse_waypoints_file(path)
+        waypoints = mm.parse_waypoints_file(path)
+        master    = mavutil.mavlink_connection(PIXHAWK_PORT, baud=PIXHAWK_BAUD)
+        master.wait_heartbeat(timeout=10)
+        mm.upload_mission(master, waypoints)
+        return jsonify({'ok': True, 'msg': f'Upload สำเร็จ {len(waypoints)} waypoints'})
     except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 400
+        return jsonify({'ok': False, 'msg': str(e)}), 500
 
-    # upload ใน background thread เพื่อไม่บล็อก Flask
-    def do_upload():
-        if mav_master:
-            mission_manager.upload_mission(mav_master, waypoints)
-            socketio.emit('mission_update', mission_manager.mission_status)
-        else:
-            mission_manager.mission_status.update({
-                'state': 'error', 'message': 'Pixhawk ไม่ได้เชื่อมต่อ'
-            })
-            socketio.emit('mission_update', mission_manager.mission_status)
+@app.route('/api/start_mission', methods=['POST'])
+def start_mission():
+    try:
+        master = mavutil.mavlink_connection(PIXHAWK_PORT, baud=PIXHAWK_BAUD)
+        master.wait_heartbeat(timeout=10)
+        mm.start_mission(master)
+        return jsonify({'ok': True, 'msg': 'Mission started'})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
 
-    threading.Thread(target=do_upload, daemon=True).start()
-    return jsonify({'ok': True, 'waypoints': len(waypoints)})
-
-
-@app.route('/api/mission/start', methods=['POST'])
-def api_mission_start():
-    if mav_master is None:
-        return jsonify({'ok': False, 'error': 'Pixhawk ไม่ได้เชื่อมต่อ'}), 400
-    ok = mission_manager.arm_and_start(mav_master)
-    return jsonify({'ok': ok})
-
-
-@app.route('/download/csv')
+@app.route('/api/download_csv')
 def download_csv():
-    path = database.export_csv()
-    if path and os.path.exists(path):
-        return send_file(path, as_attachment=True, download_name='asv_log.csv')
-    return jsonify({'error': 'ไม่สามารถ export ได้'}), 500
-
+    try:
+        path = db.export_csv()
+        return send_file(path, as_attachment=True,
+                         download_name=os.path.basename(path))
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
 
 # ---------------------------------------------------------------------------
+# CAMERA ROUTES
+# ---------------------------------------------------------------------------
+@app.route('/api/camera/devices')
+def camera_devices():
+    devices = camera_manager.list_devices()
+    return jsonify({'devices': devices, 
+                    'active': camera_manager._channel if camera_manager.is_running else None})
+
+@app.route('/api/camera/start/<int:channel>', methods=['POST'])
+def camera_start(channel):
+    try:
+        camera_manager.start(channel)
+        time.sleep(0.5)
+        if camera_manager.is_running:
+            return jsonify({'ok': True, 'msg': f'Camera {channel} started'})
+        else:
+            return jsonify({'ok': False, 'msg': f'Cannot open camera {channel}'}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+
+@app.route('/api/camera/stop', methods=['POST'])
+def camera_stop():
+    camera_manager.stop()
+    return jsonify({'ok': True})
+
+@app.route('/api/camera/stream')
+def camera_stream():
+    def generate():
+        while True:
+            jpeg = camera_manager.get_jpeg()
+            if jpeg:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
+            else:
+                time.sleep(0.1)
+    return Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@socketio.on('connect')
+def on_connect():
+    with lock:
+        snap = dict(state)
+    socketio.emit('sensor_update', snap)
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    database.init_db()
+    db.init_db()
 
-    threading.Thread(target=thread_mavlink, daemon=True).start()
-    threading.Thread(target=thread_arduino, daemon=True).start()
-    threading.Thread(target=thread_fusion,  daemon=True).start()
+    if USE_SIM:
+        print("[APP] *** SIMULATION MODE ***")
+        threading.Thread(target=sim_thread, daemon=True).start()
+    else:
+        threading.Thread(target=mavlink_thread, daemon=True).start()
+        threading.Thread(target=arduino_thread, daemon=True).start()
+        threading.Thread(target=fusion_thread,  daemon=True).start()
 
-    print(f"[APP] ASV Dashboard: http://0.0.0.0:{FLASK_PORT}")
-    socketio.run(app, host='0.0.0.0', port=FLASK_PORT, debug=False)
+    print("[APP] Server: http://0.0.0.0:5000")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)

@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASV Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/socket.io@4.7.2/client-dist/socket.io.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- HEADER -->
+  <header>
+    <div class="brand">
+      <div class="brand-pulse"><span></span></div>
+      <div>
+        <div class="brand-name">ASV Monitor</div>
+        <div class="brand-sub">AUTONOMOUS SURFACE VEHICLE · DATA FUSION</div>
+      </div>
+    </div>
+    <div class="hdr-right">
+      <div class="conn-badge"><div class="dot" id="dot-px"></div><span id="lbl-px">PIXHAWK</span></div>
+      <div class="conn-badge"><div class="dot" id="dot-ar"></div><span id="lbl-ar">ARDUINO</span></div>
+      <div id="clock">--:--:--</div>
+    </div>
+  </header>
+
+  <!-- GAUGES -->
+  <div class="gauges">
+    <div class="g-card" style="--c:var(--accent)">
+      <div class="g-lbl">Latitude</div>
+      <div class="g-val" id="v-lat">--<span class="g-unit">°</span></div>
+    </div>
+    <div class="g-card" style="--c:var(--accent)">
+      <div class="g-lbl">Longitude</div>
+      <div class="g-val" id="v-lon">--<span class="g-unit">°</span></div>
+    </div>
+    <div class="g-card" style="--c:var(--accent)">
+      <div class="g-lbl">Depth (Garmin)</div>
+      <div class="g-val" id="v-depth">--<span class="g-unit">m</span></div>
+      <div class="g-bar-wrap"><div class="g-bar" id="b-depth" style="width:0%"></div></div>
+    </div>
+    <div class="g-card" style="--c:var(--pink)">
+      <div class="g-lbl">pH</div>
+      <div class="g-val" id="v-ph">--</div>
+      <div class="g-bar-wrap"><div class="g-bar" id="b-ph" style="width:0%"></div></div>
+    </div>
+    <div class="g-card" style="--c:var(--green)">
+      <div class="g-lbl">DO</div>
+      <div class="g-val" id="v-do">--<span class="g-unit">mg/L</span></div>
+      <div class="g-bar-wrap"><div class="g-bar" id="b-do" style="width:0%"></div></div>
+    </div>
+    <div class="g-card" style="--c:var(--amber)">
+      <div class="g-lbl">Temperature</div>
+      <div class="g-val" id="v-temp">--<span class="g-unit">°C</span></div>
+      <div class="g-bar-wrap"><div class="g-bar" id="b-temp" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- CAMERA PANEL -->
+  <div class="panel" id="cam-section" style="margin-bottom:20px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div class="panel-title" style="margin:0">Camera Feed</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <select id="cam-select" style="background:var(--panel);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:11px;padding:4px 8px;border-radius:5px;outline:none">
+          <option value="">-- เลือกกล้อง --</option>
+        </select>
+        <button class="btn btn-primary" id="btn-cam-refresh" style="width:auto;padding:5px 12px;margin:0">Scan</button>
+        <button class="btn btn-success"  id="btn-cam-open"    style="width:auto;padding:5px 12px;margin:0" disabled>Open</button>
+        <button class="btn btn-amber"    id="btn-cam-close"   style="width:auto;padding:5px 12px;margin:0" disabled>Close</button>
+        <button class="btn btn-primary"  id="btn-cam-toggle"  style="width:auto;padding:5px 12px;margin:0">Hide</button>
+      </div>
+    </div>
+
+    <div id="cam-body">
+      <div id="cam-status" style="font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:8px;min-height:16px"></div>
+      <div id="cam-view" style="background:#050c13;border:1px solid var(--border);border-radius:8px;overflow:hidden;position:relative;text-align:center;min-height:240px;display:flex;align-items:center;justify-content:center">
+        <div id="cam-placeholder" style="color:var(--muted);font-family:'Share Tech Mono',monospace;font-size:12px">
+          กด Scan แล้วเลือกกล้อง จากนั้นกด Open
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main-grid">
+
+    <!-- CHARTS -->
+    <div class="charts-col">
+      <div class="panel">
+        <div class="panel-title">Depth — last 50 points (m)</div>
+        <div class="chart-wrap"><canvas id="chart-depth"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">pH — last 50 points</div>
+        <div class="chart-wrap"><canvas id="chart-ph"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Dissolved Oxygen — last 50 points (mg/L)</div>
+        <div class="chart-wrap"><canvas id="chart-do"></canvas></div>
+      </div>
+
+      <!-- LOG -->
+      <div class="panel">
+        <div class="panel-title">Data Log</div>
+        <div class="log-body" id="log"></div>
+      </div>
+    </div>
+
+    <!-- SIDE -->
+    <div class="side-col">
+
+      <!-- GPS MAP LINK -->
+      <div class="panel">
+        <div class="panel-title">GPS Position</div>
+        <div class="gps-row">
+          <div class="gps-field"><div class="lbl">LAT</div><div class="val" id="s-lat">--</div></div>
+          <div class="gps-field"><div class="lbl">LON</div><div class="val" id="s-lon">--</div></div>
+        </div>
+        <a id="map-link" href="#" target="_blank">
+          <button class="btn btn-primary">Open in Google Maps</button>
+        </a>
+      </div>
+
+      <!-- MISSION UPLOAD -->
+      <div class="panel">
+        <div class="panel-title">Mission Upload</div>
+        <label class="upload-zone" id="drop-zone">
+          <input type="file" id="wp-file" accept=".waypoints">
+          <div class="icon">&#9650;</div>
+          <div style="font-size:12px;color:var(--text)">คลิกหรือลากไฟล์</div>
+          <p>.waypoints (ArduPilot format)</p>
+        </label>
+        <div class="file-name" id="file-name"></div>
+        <button class="btn btn-primary" id="btn-upload" disabled>Upload to Pixhawk</button>
+        <button class="btn btn-success" id="btn-start"  disabled>Start Mission (AUTO)</button>
+        <div class="status-msg" id="mission-status"></div>
+      </div>
+
+      <!-- DOWNLOAD -->
+      <div class="panel">
+        <div class="panel-title">Data Export</div>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:10px">Export ข้อมูลทั้งหมด เป็น CSV</p>
+        <button class="btn btn-amber" id="btn-csv">Download CSV Log</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="/charts.js" type="module"></script>
+<script>
+const camSelect    = document.getElementById('cam-select');
+const btnScan      = document.getElementById('btn-cam-refresh');
+const btnOpen      = document.getElementById('btn-cam-open');
+const btnClose     = document.getElementById('btn-cam-close');
+const btnToggle    = document.getElementById('btn-cam-toggle');
+const camBody      = document.getElementById('cam-body');
+const camView      = document.getElementById('cam-view');
+const camStatus    = document.getElementById('cam-status');
+const camPlaceholder = '<div id="cam-placeholder" style="color:var(--muted);font-family:\'Share Tech Mono\',monospace;font-size:12px">กด Scan แล้วเลือกกล้อง จากนั้นกด Open</div>';
+let camOpen = false;
+
+function setCamStatus(msg, cls='') {
+  camStatus.textContent = msg;
+  camStatus.className = 'status-msg ' + cls;
+}
+
+async function scanCameras() {
+  setCamStatus('กำลังสแกน...', 'info');
+  try {
+    const res  = await fetch('/api/camera/devices');
+    const data = await res.json();
+    camSelect.innerHTML = '<option value="">-- เลือกกล้อง --</option>';
+    if (data.devices.length === 0) {
+      setCamStatus('ไม่พบกล้อง', 'err');
+    } else {
+      data.devices.forEach(i => {
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = `Camera ${i}`;
+        if (data.active === i) opt.selected = true;
+        camSelect.appendChild(opt);
+      });
+      setCamStatus(`พบ ${data.devices.length} กล้อง`, 'ok');
+      btnOpen.disabled = false;
+    }
+  } catch(e) {
+    setCamStatus('Scan error: ' + e.message, 'err');
+  }
+}
+
+btnOpen.addEventListener('click', async () => {
+  const ch = camSelect.value;
+  if (ch === '') { setCamStatus('เลือกกล้องก่อน', 'err'); return; }
+  setCamStatus(`เปิด camera ${ch}...`, 'info');
+  btnOpen.disabled = true;
+
+  try {
+    const res  = await fetch(`/api/camera/start/${ch}`, {method:'POST'});
+    const data = await res.json();
+    if (data.ok) {
+      camView.innerHTML = `<img src="/api/camera/stream" style="width:100%;max-height:400px;object-fit:contain" onerror="camImgError()">`;
+      camOpen = true;
+      btnClose.disabled = false;
+      btnOpen.disabled  = true;
+      setCamStatus(`Camera ${ch} — streaming`, 'ok');
+    } else {
+      setCamStatus(data.msg, 'err');
+      btnOpen.disabled = false;
+    }
+  } catch(e) {
+    setCamStatus('Error: ' + e.message, 'err');
+    btnOpen.disabled = false;
+  }
+});
+
+window.camImgError = function() {
+  camView.innerHTML = camPlaceholder.replace('--muted', 'danger');
+  camOpen = false;
+  btnOpen.disabled  = false;
+  btnClose.disabled = true;
+  setCamStatus('กล้องหลุดการเชื่อมต่อ', 'err');
+};
+
+btnClose.addEventListener('click', async () => {
+  await fetch('/api/camera/stop', {method:'POST'});
+  camView.innerHTML = camPlaceholder;
+  camOpen = false;
+  btnClose.disabled = true;
+  btnOpen.disabled  = false;
+  setCamStatus('ปิดแล้ว', '');
+});
+
+btnToggle.addEventListener('click', () => {
+  const hidden = camBody.style.display === 'none';
+  camBody.style.display = hidden ? 'block' : 'none';
+  btnToggle.textContent  = hidden ? 'Hide' : 'Show';
+});
+
+btnScan.addEventListener('click', scanCameras);
+scanCameras();
+
+// Clock
+setInterval(() => {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('th-TH', {hour12:false});
+}, 1000);
+
+// Gauge helpers
+function setGauge(id, barId, value, min, max, decimals=2) {
+  const el = document.getElementById(id);
+  const num = parseFloat(value).toFixed(decimals);
+  const unit = el.querySelector('.g-unit');
+  el.innerHTML = num + (unit ? `<span class="g-unit">${unit.textContent}</span>` : '');
+  if (barId) {
+    const pct = Math.min(100, Math.max(0, (value - min) / (max - min) * 100));
+    document.getElementById(barId).style.width = pct + '%';
+  }
+}
+function setText(id, val) { document.getElementById(id).textContent = val; }
+function setDot(id, on) {
+  document.getElementById(id).className = 'dot ' + (on ? 'on' : '');
+}
+
+fetch('/api/history').then(r => r.json()).then(records => {
+  import('/charts.js').then(m => m.loadHistory(records));
+}).catch(()=>{});
+
+const socket = io();
+socket.on('sensor_update', d => {
+  setGauge('v-lat',   null,     d.lat,   -90,  90,  6);
+  setGauge('v-lon',   null,     d.lon,   -180, 180, 6);
+  setGauge('v-depth', 'b-depth', d.depth, 0,   20,  2);
+  setGauge('v-ph',    'b-ph',    d.ph,    0,   14,  2);
+  setGauge('v-do',    'b-do',    d.do,    0,   14,  2);
+  setGauge('v-temp',  'b-temp',  d.temp,  20,  40,  1);
+
+  setText('s-lat', d.lat.toFixed(6));
+  setText('s-lon', d.lon.toFixed(6));
+
+  setDot('dot-px', d.pixhawk_ok);
+  setDot('dot-ar', d.arduino_ok);
+
+  document.getElementById('map-link').href =
+    `https://www.google.com/maps?q=${d.lat},${d.lon}`;
+
+  import('/charts.js').then(m => m.pushPoint(d.ts, d.depth, d.ph, d.do));
+
+  const log = document.getElementById('log');
+  const row = document.createElement('div');
+  row.innerHTML = `<span class="ts">${d.ts}</span> lat=<span class="ld">${d.lat.toFixed(4)}</span> lon=<span class="ld">${d.lon.toFixed(4)}</span> depth=<span class="ld">${d.depth}</span> pH=<span class="lph">${d.ph}</span> DO=<span class="lv">${d.do}</span> T=<span class="lt">${d.temp}°C</span>`;
+  log.prepend(row);
+  while (log.children.length > 30) log.removeChild(log.lastChild);
+});
+
+// Mission
+const wpFile = document.getElementById('wp-file');
+const mStatus = document.getElementById('mission-status');
+const fileName = document.getElementById('file-name');
+
+wpFile.addEventListener('change', () => {
+  if (wpFile.files[0]) {
+    fileName.textContent = wpFile.files[0].name;
+    document.getElementById('btn-upload').disabled = false;
+  }
+});
+
+document.getElementById('btn-upload').addEventListener('click', async () => {
+  if (!wpFile.files[0]) return;
+  mStatus.className = 'status-msg info';
+  mStatus.textContent = 'กำลัง upload...';
+  const fd = new FormData();
+  fd.append('file', wpFile.files[0]);
+  try {
+    const res = await fetch('/api/upload_mission', {method:'POST', body:fd});
+    const data = await res.json();
+    mStatus.className = 'status-msg ' + (data.ok ? 'ok' : 'err');
+    mStatus.textContent = data.msg;
+    if (data.ok) document.getElementById('btn-start').disabled = false;
+  } catch(e) {
+    mStatus.className = 'status-msg err';
+    mStatus.textContent = 'Error: ' + e.message;
+  }
+});
+
+document.getElementById('btn-start').addEventListener('click', async () => {
+  if (!confirm('ยืนยันการเริ่ม AUTO mode?')) return;
+  mStatus.className = 'status-msg info';
+  mStatus.textContent = 'เริ่ม mission...';
+  try {
+    const res = await fetch('/api/start_mission', {method:'POST'});
+    const data = await res.json();
+    mStatus.className = 'status-msg ' + (data.ok ? 'ok' : 'err');
+    mStatus.textContent = data.msg;
+  } catch(e) {
+    mStatus.className = 'status-msg err';
+    mStatus.textContent = 'Error: ' + e.message;
+  }
+});
+
+document.getElementById('btn-csv').addEventListener('click', () => {
+  window.location.href = '/api/download_csv';
+});
+</script>
+</body>
+</html>
