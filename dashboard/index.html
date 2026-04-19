@@ -6,7 +6,7 @@
 <title>ASV Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="style.css">
 <script src="https://cdn.jsdelivr.net/npm/socket.io@4.7.2/client-dist/socket.io.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
@@ -152,7 +152,7 @@
   </div>
 </div>
 
-<script src="/charts.js" type="module"></script>
+<script src="charts.js" type="module"></script>
 <script>
 const camSelect    = document.getElementById('cam-select');
 const btnScan      = document.getElementById('btn-cam-refresh');
@@ -267,7 +267,7 @@ function setDot(id, on) {
 }
 
 fetch('/api/history').then(r => r.json()).then(records => {
-  import('/charts.js').then(m => m.loadHistory(records));
+  import('charts.js').then(m => m.loadHistory(records));
 }).catch(()=>{});
 
 const socket = io();
@@ -288,7 +288,7 @@ socket.on('sensor_update', d => {
   document.getElementById('map-link').href =
     `https://www.google.com/maps?q=${d.lat},${d.lon}`;
 
-  import('/charts.js').then(m => m.pushPoint(d.ts, d.depth, d.ph, d.do));
+  import('charts.js').then(m => m.pushPoint(d.ts, d.depth, d.ph, d.do));
 
   const log = document.getElementById('log');
   const row = document.createElement('div');
