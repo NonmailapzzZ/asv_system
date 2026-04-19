@@ -6,7 +6,7 @@
 <title>ASV Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <script src="https://cdn.jsdelivr.net/npm/socket.io@4.7.2/client-dist/socket.io.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
@@ -152,18 +152,45 @@
   </div>
 </div>
 
-<script src="charts.js" type="module"></script>
-<script>
-const camSelect    = document.getElementById('cam-select');
-const btnScan      = document.getElementById('btn-cam-refresh');
-const btnOpen      = document.getElementById('btn-cam-open');
-const btnClose     = document.getElementById('btn-cam-close');
-const btnToggle    = document.getElementById('btn-cam-toggle');
-const camBody      = document.getElementById('cam-body');
-const camView      = document.getElementById('cam-view');
-const camStatus    = document.getElementById('cam-status');
+<script type="module">
+import { pushPoint, loadHistory } from '{{ url_for("static", filename="charts.js") }}';
+
+// Clock
+setInterval(() => {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('th-TH', {hour12:false});
+}, 1000);
+
+// Gauge helpers
+function setGauge(id, barId, value, min, max, decimals=2) {
+  const el = document.getElementById(id);
+  const num = parseFloat(value).toFixed(decimals);
+  const unit = el.querySelector('.g-unit');
+  el.innerHTML = num + (unit ? `<span class="g-unit">${unit.textContent}</span>` : '');
+  if (barId) {
+    const pct = Math.min(100, Math.max(0, (value - min) / (max - min) * 100));
+    document.getElementById(barId).style.width = pct + '%';
+  }
+}
+function setText(id, val) { document.getElementById(id).textContent = val; }
+function setDot(id, on) {
+  document.getElementById(id).className = 'dot ' + (on ? 'on' : '');
+}
+
+fetch('{{ url_for("api_history") }}')
+  .then(r => r.json())
+  .then(records => loadHistory(records))
+  .catch(()=>{});
+
+// CAMERA
+const camSelect = document.getElementById('cam-select');
+const btnScan = document.getElementById('btn-cam-refresh');
+const btnOpen = document.getElementById('btn-cam-open');
+const btnClose = document.getElementById('btn-cam-close');
+const btnToggle = document.getElementById('btn-cam-toggle');
+const camBody = document.getElementById('cam-body');
+const camView = document.getElementById('cam-view');
+const camStatus = document.getElementById('cam-status');
 const camPlaceholder = '<div id="cam-placeholder" style="color:var(--muted);font-family:\'Share Tech Mono\',monospace;font-size:12px">กด Scan แล้วเลือกกล้อง จากนั้นกด Open</div>';
-let camOpen = false;
 
 function setCamStatus(msg, cls='') {
   camStatus.textContent = msg;
@@ -173,7 +200,7 @@ function setCamStatus(msg, cls='') {
 async function scanCameras() {
   setCamStatus('กำลังสแกน...', 'info');
   try {
-    const res  = await fetch('/api/camera/devices');
+    const res = await fetch('{{ url_for("camera_devices") }}');
     const data = await res.json();
     camSelect.innerHTML = '<option value="">-- เลือกกล้อง --</option>';
     if (data.devices.length === 0) {
@@ -199,15 +226,13 @@ btnOpen.addEventListener('click', async () => {
   if (ch === '') { setCamStatus('เลือกกล้องก่อน', 'err'); return; }
   setCamStatus(`เปิด camera ${ch}...`, 'info');
   btnOpen.disabled = true;
-
   try {
-    const res  = await fetch(`/api/camera/start/${ch}`, {method:'POST'});
+    const res = await fetch(`{{ url_for("camera_start", channel=0) }}`.replace('0', ch), {method:'POST'});
     const data = await res.json();
     if (data.ok) {
-      camView.innerHTML = `<img src="/api/camera/stream" style="width:100%;max-height:400px;object-fit:contain" onerror="camImgError()">`;
-      camOpen = true;
+      camView.innerHTML = `<img src="{{ url_for("camera_stream") }}" style="width:100%;max-height:400px;object-fit:contain" onerror="camImgError()">`;
       btnClose.disabled = false;
-      btnOpen.disabled  = true;
+      btnOpen.disabled = true;
       setCamStatus(`Camera ${ch} — streaming`, 'ok');
     } else {
       setCamStatus(data.msg, 'err');
@@ -221,63 +246,37 @@ btnOpen.addEventListener('click', async () => {
 
 window.camImgError = function() {
   camView.innerHTML = camPlaceholder.replace('--muted', 'danger');
-  camOpen = false;
-  btnOpen.disabled  = false;
+  btnOpen.disabled = false;
   btnClose.disabled = true;
   setCamStatus('กล้องหลุดการเชื่อมต่อ', 'err');
 };
 
 btnClose.addEventListener('click', async () => {
-  await fetch('/api/camera/stop', {method:'POST'});
+  await fetch('{{ url_for("camera_stop") }}', {method:'POST'});
   camView.innerHTML = camPlaceholder;
-  camOpen = false;
   btnClose.disabled = true;
-  btnOpen.disabled  = false;
+  btnOpen.disabled = false;
   setCamStatus('ปิดแล้ว', '');
 });
 
 btnToggle.addEventListener('click', () => {
   const hidden = camBody.style.display === 'none';
   camBody.style.display = hidden ? 'block' : 'none';
-  btnToggle.textContent  = hidden ? 'Hide' : 'Show';
+  btnToggle.textContent = hidden ? 'Hide' : 'Show';
 });
 
 btnScan.addEventListener('click', scanCameras);
 scanCameras();
 
-// Clock
-setInterval(() => {
-  document.getElementById('clock').textContent = new Date().toLocaleTimeString('th-TH', {hour12:false});
-}, 1000);
-
-// Gauge helpers
-function setGauge(id, barId, value, min, max, decimals=2) {
-  const el = document.getElementById(id);
-  const num = parseFloat(value).toFixed(decimals);
-  const unit = el.querySelector('.g-unit');
-  el.innerHTML = num + (unit ? `<span class="g-unit">${unit.textContent}</span>` : '');
-  if (barId) {
-    const pct = Math.min(100, Math.max(0, (value - min) / (max - min) * 100));
-    document.getElementById(barId).style.width = pct + '%';
-  }
-}
-function setText(id, val) { document.getElementById(id).textContent = val; }
-function setDot(id, on) {
-  document.getElementById(id).className = 'dot ' + (on ? 'on' : '');
-}
-
-fetch('/api/history').then(r => r.json()).then(records => {
-  import('charts.js').then(m => m.loadHistory(records));
-}).catch(()=>{});
-
+// SocketIO
 const socket = io();
 socket.on('sensor_update', d => {
-  setGauge('v-lat',   null,     d.lat,   -90,  90,  6);
-  setGauge('v-lon',   null,     d.lon,   -180, 180, 6);
-  setGauge('v-depth', 'b-depth', d.depth, 0,   20,  2);
-  setGauge('v-ph',    'b-ph',    d.ph,    0,   14,  2);
-  setGauge('v-do',    'b-do',    d.do,    0,   14,  2);
-  setGauge('v-temp',  'b-temp',  d.temp,  20,  40,  1);
+  setGauge('v-lat', null, d.lat, -90, 90, 6);
+  setGauge('v-lon', null, d.lon, -180, 180, 6);
+  setGauge('v-depth', 'b-depth', d.depth, 0, 20, 2);
+  setGauge('v-ph', 'b-ph', d.ph, 0, 14, 2);
+  setGauge('v-do', 'b-do', d.do, 0, 14, 2);
+  setGauge('v-temp', 'b-temp', d.temp, 20, 40, 1);
 
   setText('s-lat', d.lat.toFixed(6));
   setText('s-lon', d.lon.toFixed(6));
@@ -285,10 +284,9 @@ socket.on('sensor_update', d => {
   setDot('dot-px', d.pixhawk_ok);
   setDot('dot-ar', d.arduino_ok);
 
-  document.getElementById('map-link').href =
-    `https://www.google.com/maps?q=${d.lat},${d.lon}`;
+  document.getElementById('map-link').href = `https://www.google.com/maps?q=${d.lat},${d.lon}`;
 
-  import('charts.js').then(m => m.pushPoint(d.ts, d.depth, d.ph, d.do));
+  pushPoint(d.ts, d.depth, d.ph, d.do);
 
   const log = document.getElementById('log');
   const row = document.createElement('div');
@@ -297,7 +295,7 @@ socket.on('sensor_update', d => {
   while (log.children.length > 30) log.removeChild(log.lastChild);
 });
 
-// Mission
+// MISSION
 const wpFile = document.getElementById('wp-file');
 const mStatus = document.getElementById('mission-status');
 const fileName = document.getElementById('file-name');
@@ -316,7 +314,7 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
   const fd = new FormData();
   fd.append('file', wpFile.files[0]);
   try {
-    const res = await fetch('/api/upload_mission', {method:'POST', body:fd});
+    const res = await fetch('{{ url_for("upload_mission") }}', {method:'POST', body:fd});
     const data = await res.json();
     mStatus.className = 'status-msg ' + (data.ok ? 'ok' : 'err');
     mStatus.textContent = data.msg;
@@ -332,7 +330,7 @@ document.getElementById('btn-start').addEventListener('click', async () => {
   mStatus.className = 'status-msg info';
   mStatus.textContent = 'เริ่ม mission...';
   try {
-    const res = await fetch('/api/start_mission', {method:'POST'});
+    const res = await fetch('{{ url_for("start_mission") }}', {method:'POST'});
     const data = await res.json();
     mStatus.className = 'status-msg ' + (data.ok ? 'ok' : 'err');
     mStatus.textContent = data.msg;
@@ -343,7 +341,7 @@ document.getElementById('btn-start').addEventListener('click', async () => {
 });
 
 document.getElementById('btn-csv').addEventListener('click', () => {
-  window.location.href = '/api/download_csv';
+  window.location.href = '{{ url_for("download_csv") }}';
 });
 </script>
 </body>

@@ -1,16 +1,5 @@
 """
 app.py — ASV System Main Flask Application
-สมองหลักสำหรับระบบ Autonomous Surface Vehicle
-
-Thread A: MAVLink (Pixhawk)
-Thread B: Arduino Serial (pH, DO, Temp)
-Thread C: Data Fusion + SQLite + WebSocket
-
-ติดตั้ง:
-    pip install flask flask-socketio pymavlink pyserial eventlet opencv-python-headless
-
-รัน:
-    python3 app.py
 """
 
 import os, time, json, threading, serial, serial.tools.list_ports, random, math
@@ -30,10 +19,13 @@ PIXHAWK_PORT   = '/dev/ttyACM0'
 PIXHAWK_BAUD   = 115200
 ARDUINO_BAUD   = 9600
 FUSION_INTERVAL = 2.0
-USE_SIM        = True  # True = จำลอง, False = hardware จริง
+USE_SIM        = True
 # ---------------------------------------------------------------------------
 
-app = Flask(__name__, template_folder='dashboard', static_folder='dashboard')
+# ชี้ให้ Flask รู้ว่า template อยู่ folder dashboard และ static files ก็อยู่ที่นั่นเหมือนกัน
+app = Flask(__name__, 
+            template_folder=os.path.join(os.path.dirname(__file__), 'dashboard'),
+            static_folder=os.path.join(os.path.dirname(__file__), 'dashboard'))
 app.config['SECRET_KEY'] = 'asv-secret-2024'
 socketio = SocketIO(app, cors_allowed_origins='*', async_mode='eventlet')
 
