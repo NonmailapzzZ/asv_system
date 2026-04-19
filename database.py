@@ -26,7 +26,7 @@ def init_db():
                 lon       REAL    DEFAULT 0.0,
                 depth     REAL    DEFAULT 0.0,
                 ph        REAL    DEFAULT 0.0,
-                do        REAL    DEFAULT 0.0,
+                do_val        REAL    DEFAULT 0.0,
                 temp      REAL    DEFAULT 0.0
             )
         """)
@@ -37,7 +37,7 @@ def insert_record(lat, lon, depth, ph, do_val, temp):
     ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     with get_connection() as conn:
         conn.execute("""
-            INSERT INTO asv_logs (timestamp, lat, lon, depth, ph, do, temp)
+            INSERT INTO asv_logs (timestamp, lat, lon, depth, ph, do_val, temp)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (ts, lat, lon, depth, ph, do_val, temp))
         conn.commit()
@@ -57,9 +57,9 @@ def export_csv():
         rows = conn.execute("SELECT * FROM asv_logs ORDER BY id ASC").fetchall()
     with open(filepath, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(['id','timestamp','lat','lon','depth','ph','do','temp'])
+        writer.writerow(['id','timestamp','lat','lon','depth','ph','do_val','temp'])
         for r in rows:
             writer.writerow([r['id'],r['timestamp'],r['lat'],r['lon'],
-                             r['depth'],r['ph'],r['do'],r['temp']])
+                             r['depth'],r['ph'],r['do_val'],r['temp']])
     print(f"[DB] Exported {len(rows)} records -> {filepath}")
     return filepath
