@@ -50,9 +50,9 @@ unsigned long lastSensorRead = 0;
 
 // ===== CALIBRATION CONSTANTS =====
 #define PH_VREF     5.0
-#define PH_OFFSET   28.268
-#define PH_VMID     2.5
-#define PH_SLOPE_MV -7.4
+#define PH_OFFSET   27.34
+// #define PH_VMID     2.5
+#define PH_SLOPE_MV -7.01
 
 #define DO_VREF     5.0
 #define DO_MAX_MV   4.0    // 4.0V = 14 mg/L
@@ -258,7 +258,7 @@ void readPH() {
   float ph = (PH_SLOPE_MV * voltage) + PH_OFFSET;
   
   // Constrain to valid pH range
-  ph = constrain(ph, 0.0, 14.0);
+  // ph = constrain(ph, 0.0, 14.0);
   
   waterPH = applyMovingAverage(ph, phBuffer);
 }

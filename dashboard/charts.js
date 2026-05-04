@@ -15,6 +15,22 @@ function makeDataset(label, color, data) {
   };
 }
 
+// Update sampling status ทุก 1 วินาที
+setInterval(async () => {
+  const response = await fetch('/api/sampling/status');
+  const status = await response.json();
+  
+  document.getElementById('status-text').textContent = 
+    status.active ? 'SAMPLING' : 'Idle';
+  document.getElementById('status-progress').textContent = 
+    status.progress.toFixed(0) + '%';
+  document.getElementById('status-samples').textContent = 
+    status.sample_count;
+  document.getElementById('status-remaining').textContent = 
+    status.remaining.toFixed(1);
+}, 1000);
+
+
 const commonOptions = (unit) => ({
   responsive: true,
   animation: { duration: 250 },

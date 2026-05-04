@@ -1,10 +1,10 @@
 """
 app_uart_version.py — ASV System Flask Application (UART Version)
 
-📊 Data Flow:
+Data Flow:
    Arduino (UART) → RPi (app.py) → SQLite → Dashboard (WebSocket)
    
-🔧 Key Features:
+Key Features:
    - อ่านค่า sensor จาก Arduino ผ่าน UART (/dev/ttyS0)
    - Fusion data จาก UART + (optional) Pixhawk
    - Save ลง SQLite database
@@ -13,10 +13,10 @@ app_uart_version.py — ASV System Flask Application (UART Version)
    - Mission upload/start
    - Camera streaming
 
-⚙️ ติดตั้ง:
+ติดตั้ง:
    pip install flask flask-socketio pymavlink pyserial eventlet opencv-python-headless
 
-🚀 รัน:
+รัน:
    python3 app_uart_version.py
 """
 
@@ -29,6 +29,9 @@ import database as db
 import mission_manager as mm
 from camera import camera_manager
 from uart_reader import ArduinoUARTReader
+from pixhawk_reader import PixhawkReader
+from sampling_manager import SamplingManager
+
 
 # ===== LOGGING =====
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +42,21 @@ UART_PORT       = '/dev/ttyS0'      # RPi UART port (GPIO 14/15)
 UART_BAUD       = 9600              # Arduino baud rate
 FUSION_INTERVAL = 2.0               # วินาที - บันทึก + emit ผ่าน WebSocket
 USE_SIM         = False             # ปิด simulation mode, เปิด UART จริง
+
+PIXHAWK_PORT = '/dev/ttyACM0'  # USB
+# PIXHAWK_PORT = '/dev/ttyS0'   # UART TELEM1
+PIXHAWK_BAUD = 115200
+USE_PIXHAWK = True
+
+sampler = SamplingManager()
+
+# GLOBAL
+pixhawk = None
+
+if USE_PIXHAWK:
+    pixhawk = PixhawkReader(PIXHAWK_PORT, PIXHAWK_BAUD)
+    
+
 
 # ===== FLASK SETUP =====
 app = Flask(__name__, 
@@ -59,8 +77,14 @@ state = {
     'ph': 0.0,
     'do': 0.0,
     
+    # Pixhawk data
+    'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+    'battery_voltage': 0.0,
+    'battery_remaining': 0.0,
+    'pixhawk_ok': False,
+    
     # Status
-    'uart_ok': False,           # ✅ UART connection status
+    'uart_ok': False,           #UART connection status
     'pixhawk_ok': False,        # (optional) Pixhawk status
     'ts': '',                   # timestamp
 }
@@ -69,12 +93,52 @@ state = {
 uart_reader = None
 
 # ===================================================
+# Detect Pixhawk Delay THREAD
+# ===================================================
+
+def pixhawk_thread():
+    """
+    Monitor Pixhawk MAVLink messages
+    Detect DO_SET_SERVO command (Delay equivalent)
+    """
+    while True:
+        msg = pixhawk.master.recv_match(
+            type=['COMMAND_LONG', 'COMMAND_ACK'],
+            blocking=False
+        )
+        
+        if msg:
+            # Detect Delay command
+            if msg.get_type() == 'COMMAND_LONG':
+                if msg.command == 184:  # MAV_CMD_DO_SET_SERVO
+                    duration = msg.param2  # duration in seconds
+                    log.info(f"[PIXHAWK] Delay detected: {duration}s")
+                    sampler.start_sampling(int(duration))
+            
+            # Detect Delay end
+            elif msg.get_type() == 'COMMAND_ACK':
+                if msg.command == 184:  # Delay ended
+                    log.info("[PIXHAWK] Delay ended")
+                    result = sampler.stop_sampling()
+                    
+                    # Calculate and save to database
+                    avg = sampler.get_average_sample()
+                    if avg:
+                        db.insert_record(
+                            avg['lat'], avg['lon'], avg['depth'],
+                            avg['ph'], avg['do'], avg['temp']
+                        )
+                        log.info(f"[DB] ✓ Saved {avg['sample_count']} samples as 1 record")
+                        sampler.clear_samples()
+
+
+# ===================================================
 # UART THREAD — อ่านข้อมูล Arduino
 # ===================================================
 
 def uart_thread():
     """
-    🔄 Thread A: UART Reader
+    Thread A: UART Reader
     
     ทำงาน:
     1. เชื่อมต่อกับ Arduino ผ่าน UART (/dev/ttyS0)
@@ -82,7 +146,7 @@ def uart_thread():
     3. Parse JSON: {"lat": ..., "lon": ..., "depth": ..., "temp": ..., "ph": ..., "do": ...}
     4. Update state dictionary
     
-    ⚠️ อ่านทีละ line, ไม่กำหนดช่วงเวลา (Arduino ส่งทุก 1 วินาที)
+    อ่านทีละ line, ไม่กำหนดช่วงเวลา (Arduino ส่งทุก 1 วินาที)
     """
     global uart_reader, state
     
@@ -98,11 +162,11 @@ def uart_thread():
                 time.sleep(5)
                 continue
             
-            log.info("[UART] ✅ Connected to Arduino")
+            log.info("[UART]Connected to Arduino")
             with lock:
                 state['uart_ok'] = True
             
-            # ✅ อ่านข้อมูล continuously
+            #อ่านข้อมูล continuously
             for sensor_data in uart_reader.read_sensors_continuous(interval=0.1):
                 if sensor_data:
                     # Update state ด้วย sensor data จาก Arduino
@@ -130,41 +194,26 @@ def uart_thread():
 
 def fusion_thread():
     """
-    🔀 Thread B: Data Fusion & Broadcasting
-    
-    ทำงาน:
-    1. อ่าน state ล่าสุด (มีการอัปเดตจาก uart_thread)
-    2. บันทึก SQLite database
-    3. Emit ไปยัง Dashboard ผ่าน WebSocket
-    
-    ⏱️ Interval: 2 วินาที (FUSION_INTERVAL)
+    Fusion thread:
+    - Merge Arduino + Pixhawk data
+    - Only insert to DB if NOT sampling
     """
     while True:
         time.sleep(FUSION_INTERVAL)
         
-        # ✅ Copy state snapshot
         with lock:
             snap = dict(state)
             snap['ts'] = datetime.utcnow().strftime('%H:%M:%S')
-            state['ts'] = snap['ts']
         
-        # ✅ บันทึก SQLite
-        try:
+        # ห้ามบันทึก DB ตอน sampling active
+        if not sampler.sampling_active:
             db.insert_record(
                 snap['lat'], snap['lon'], snap['depth'],
-                snap['ph'],  snap['do'],  snap['temp']
+                snap['ph'], snap['do'], snap['temp']
             )
-            log.info(f"[DB] ✓ Logged: depth={snap['depth']}m, temp={snap['temp']}°C, pH={snap['ph']}")
-        except Exception as e:
-            log.error(f"[DB] Error: {e}")
         
-        # ✅ Emit ไปยัง Dashboard (WebSocket)
-        try:
-            socketio.emit('sensor_update', snap)
-            log.debug(f"[WS] ✓ Emitted to {snap.get('ts', 'unknown')}")
-        except Exception as e:
-            log.error(f"[WS] Error: {e}")
-
+        # Emit to dashboard
+        socketio.emit('sensor_update', snap)
 # ===================================================
 # SIMULATION THREAD (optional)
 # ===================================================
@@ -200,22 +249,60 @@ def sim_thread():
         time.sleep(FUSION_INTERVAL)
 
 # ===================================================
-# FLASK ROUTES
+# MAVLINK ROUTES
 # ===================================================
 
 @app.route('/')
 def index():
-    """📊 Dashboard home page"""
+    """ Dashboard home page"""
     return render_template('index.html')
 
 @app.route('/api/history')
 def api_history():
-    """📈 ดึง 50 record ล่าสุด สำหรับ load chart"""
+    """ ดึง 50 record ล่าสุด สำหรับ load chart"""
     return jsonify(db.get_recent(50))
 
+@app.route('/api/pixhawk/set_mode/<mode_name>', methods=['POST'])
+def set_mode(mode_name):
+    """ เปลี่ยน flight mode"""
+    if not pixhawk or not pixhawk.connected:
+        return jsonify({'ok': False, 'msg': 'Pixhawk not connected'}), 400
+    
+    if pixhawk.set_mode(mode_name):
+        return jsonify({'ok': True, 'msg': f'Mode changed to {mode_name}'})
+    else:
+        return jsonify({'ok': False, 'msg': 'Failed to change mode'}), 500
+
+@app.route('/api/pixhawk/arm', methods=['POST'])
+def arm():
+    """ Arm motors"""
+    if not pixhawk or not pixhawk.connected:
+        return jsonify({'ok': False, 'msg': 'Pixhawk not connected'}), 400
+    
+    if pixhawk.arm():
+        return jsonify({'ok': True, 'msg': 'Motors armed'})
+    else:
+        return jsonify({'ok': False, 'msg': 'Failed to arm'}), 500
+
+@app.route('/api/pixhawk/disarm', methods=['POST'])
+def disarm():
+    """ Disarm motors"""
+    if not pixhawk or not pixhawk.connected:
+        return jsonify({'ok': False, 'msg': 'Pixhawk not connected'}), 400
+    
+    if pixhawk.disarm():
+        return jsonify({'ok': True, 'msg': 'Motors disarmed'})
+    else:
+        return jsonify({'ok': False, 'msg': 'Failed to disarm'}), 500
+    
+    
+# ===================================================
+# FLASK ROUTES
+# ===================================================
+    
 @app.route('/api/upload_mission', methods=['POST'])
 def upload_mission():
-    """🗺️ Upload .waypoints ไปยัง Pixhawk (ถ้าต่อ)"""
+    """Upload .waypoints ไปยัง Pixhawk (ถ้าต่อ)"""
     if 'file' not in request.files:
         return jsonify({'ok': False, 'msg': 'ไม่มีไฟล์'}), 400
 
@@ -229,7 +316,7 @@ def upload_mission():
 
     try:
         waypoints = mm.parse_waypoints_file(path)
-        # ⚠️ ต้องมี Pixhawk ต่อถึงจะใช้ได้
+        # ต้องมี Pixhawk ต่อถึงจะใช้ได้
         from pymavlink import mavutil
         master = mavutil.mavlink_connection('/dev/ttyACM0', baud=115200)
         master.wait_heartbeat(timeout=10)
@@ -240,7 +327,7 @@ def upload_mission():
 
 @app.route('/api/start_mission', methods=['POST'])
 def start_mission():
-    """🚀 สั่ง AUTO mode (ถ้าต่อ Pixhawk)"""
+    """สั่ง AUTO mode (ถ้าต่อ Pixhawk)"""
     try:
         from pymavlink import mavutil
         master = mavutil.mavlink_connection('/dev/ttyACM0', baud=115200)
@@ -252,7 +339,7 @@ def start_mission():
 
 @app.route('/api/download_csv')
 def download_csv():
-    """💾 Export CSV log"""
+    """Export CSV log"""
     try:
         path = db.export_csv()
         return send_file(path, as_attachment=True,
@@ -261,19 +348,68 @@ def download_csv():
         return jsonify({'ok': False, 'msg': str(e)}), 500
 
 # ===================================================
+# API ROUTES
+# ===================================================
+
+@app.route('/api/sampling/status')
+def sampling_status():
+    """ดึงสถานะ sampling"""
+    status = sampler.get_status()
+    return jsonify(status)
+
+@app.route('/api/sampling/start/<int:seconds>', methods=['POST'])
+def sampling_start(seconds):
+    """Manual start sampling (สำหรับ test)"""
+    sampler.start_sampling(seconds)
+    return jsonify({'ok': True, 'msg': f'Sampling started for {seconds}s'})
+
+@app.route('/api/sampling/stop', methods=['POST'])
+def sampling_stop():
+    """Manual stop sampling"""
+    result = sampler.stop_sampling()
+    
+    # Auto-save average to DB
+    avg = sampler.get_average_sample()
+    if avg:
+        db.insert_record(
+            avg['lat'], avg['lon'], avg['depth'],
+            avg['ph'], avg['do'], avg['temp']
+        )
+        sampler.clear_samples()
+        return jsonify({
+            'ok': True,
+            'samples_collected': avg['sample_count'],
+            'message': f'Saved {avg["sample_count"]} samples as 1 record'
+        })
+    else:
+        return jsonify({'ok': False, 'msg': 'No samples collected'}), 400
+
+@app.route('/api/sampling/details')
+def sampling_details():
+    """ดึงรายละเอียด samples ทั้งหมด"""
+    samples = sampler.get_all_samples()
+    avg = sampler.get_average_sample()
+    
+    return jsonify({
+        'average': avg,
+        'samples': samples,
+        'count': len(samples)
+    })
+
+# ===================================================
 # CAMERA ROUTES
 # ===================================================
 
 @app.route('/api/camera/devices')
 def camera_devices():
-    """📹 หา webcam ที่ต่ออยู่"""
+    """ หา webcam ที่ต่ออยู่"""
     devices = camera_manager.list_devices()
     return jsonify({'devices': devices, 
                     'active': camera_manager._channel if camera_manager.is_running else None})
 
 @app.route('/api/camera/start/<int:channel>', methods=['POST'])
 def camera_start(channel):
-    """📹 เปิดกล้อง channel"""
+    """เปิดกล้อง channel"""
     try:
         camera_manager.start(channel)
         time.sleep(0.5)
@@ -286,13 +422,13 @@ def camera_start(channel):
 
 @app.route('/api/camera/stop', methods=['POST'])
 def camera_stop():
-    """📹 ปิดกล้อง"""
+    """ปิดกล้อง"""
     camera_manager.stop()
     return jsonify({'ok': True})
 
 @app.route('/api/camera/stream')
 def camera_stream():
-    """📹 MJPEG stream"""
+    """MJPEG stream"""
     def generate():
         while True:
             jpeg = camera_manager.get_jpeg()
@@ -306,7 +442,7 @@ def camera_stream():
 
 @app.route('/api/camera/error')
 def camera_error():
-    """📹 ดึง error message"""
+    """ดึง error message"""
     error = camera_manager.get_error()
     return jsonify({'error': error})
 
@@ -316,22 +452,81 @@ def camera_error():
 
 @socketio.on('connect')
 def on_connect():
-    """🔗 Browser เชื่อมต่อ"""
+    """Browser เชื่อมต่อ"""
     with lock:
         snap = dict(state)
     socketio.emit('sensor_update', snap)
     log.info("[WS] Client connected")
+    
+# ===================================================
+# Pixhawk Thread
+# ===================================================
+def pixhawk_thread():
+    """
+    Thread: อ่านข้อมูล Pixhawk
+    
+    ทำงาน:
+    1. เชื่อมต่อ Pixhawk
+    2. อ่าน GPS, Attitude, Battery
+    3. Update state
+    """
+    global pixhawk, state
+    
+    while True:
+        try:
+            if not pixhawk or not pixhawk.connected:
+                log.info("[PIXHAWK] Reconnecting...")
+                pixhawk = PixhawkReader(PIXHAWK_PORT, PIXHAWK_BAUD)
+                time.sleep(5)
+                continue
+            
+            # อ่านข้อมูล
+            data = pixhawk.read_all()
+            
+            if data:
+                with lock:
+                    # Update GPS (ถ้า Pixhawk มี GPS)
+                    if 'lat' in data:
+                        state['lat'] = data['lat']
+                        state['lon'] = data['lon']
+                    
+                    # Update attitude
+                    if 'roll' in data:
+                        state['roll'] = data['roll']
+                        state['pitch'] = data['pitch']
+                        state['yaw'] = data['yaw']
+                    
+                    # Update battery
+                    if 'voltage' in data:
+                        state['battery_voltage'] = data['voltage']
+                        state['battery_remaining'] = data['remaining']
+                    
+                    state['pixhawk_ok'] = True
+                    log.info(f"[PIXHAWK] ✓ Lat={data.get('lat', 0):.4f}, "
+                             f"Lon={data.get('lon', 0):.4f}")
+            else:
+                with lock:
+                    state['pixhawk_ok'] = False
+            
+            time.sleep(1)
+        
+        except Exception as e:
+            log.error(f"[PIXHAWK] Error: {e}")
+            with lock:
+                state['pixhawk_ok'] = False
+            time.sleep(5)
+
 
 # ===================================================
 # MAIN
 # ===================================================
 
 if __name__ == '__main__':
-    # ✅ Initialize database
+    #Initialize database
     db.init_db()
     log.info("[MAIN] Database initialized")
     
-    # ✅ Start threads
+    #Start threads
     if USE_SIM:
         log.warning("[MAIN] *** SIMULATION MODE ***")
         threading.Thread(target=sim_thread, daemon=True).start()
@@ -339,11 +534,14 @@ if __name__ == '__main__':
         log.info("[MAIN] *** UART MODE ***")
         threading.Thread(target=uart_thread, daemon=True).start()
         threading.Thread(target=fusion_thread, daemon=True).start()
+        
+    if USE_PIXHAWK:
+        threading.Thread(target=pixhawk_thread, daemon=True).start()
     
     log.info("[MAIN] Starting Flask server...")
-    log.info("[MAIN] 🌐 Dashboard: http://0.0.0.0:5000")
-    log.info(f"[MAIN] 🔌 UART: {UART_PORT} @ {UART_BAUD} baud")
-    log.info(f"[MAIN] 🗄️  Database: logs/asv_data.db")
+    log.info("[MAIN] Dashboard: http://0.0.0.0:5000")
+    log.info(f"[MAIN] UART: {UART_PORT} @ {UART_BAUD} baud")
+    log.info(f"[MAIN] Database: logs/asv_data.db")
     
-    # ✅ Start Flask with SocketIO
+    #Start Flask with SocketIO
     socketio.run(app, host='0.0.0.0', port=5000, debug=False)

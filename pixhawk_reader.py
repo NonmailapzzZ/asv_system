@@ -1,0 +1,246 @@
+"""
+pixhawk_reader.py — RPi อ่านข้อมูล Pixhawk
+"""
+
+from pymavlink import mavutil
+import time
+import logging
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+
+class PixhawkReader:
+    def __init__(self, port='/dev/ttyACM0', baud=115200):
+        """
+        เชื่อมต่อกับ Pixhawk
+        
+        Args:
+            port: Serial port (/dev/ttyACM0 สำหรับ USB, /dev/ttyS0 สำหรับ UART)
+            baud: Baud rate (115200 ปกติสำหรับ USB, 57600 สำหรับ TELEM1)
+        """
+        try:
+            self.master = mavutil.mavlink_connection(port, baud=baud)
+            self.master.wait_heartbeat(timeout=10)
+            log.info(f"[PIXHAWK] Connected to {port} at {baud} baud")
+            self.connected = True
+        except Exception as e:
+            log.error(f"[PIXHAWK] Cannot connect: {e}")
+            self.connected = False
+            self.master = None
+    
+    def read_gps(self):
+        """
+        อ่าน GPS location จาก Pixhawk
+        
+        Returns:
+            dict: {"lat": ..., "lon": ..., "alt": ...}
+        """
+        if not self.connected:
+            return None
+        
+        try:
+            # รอข้อมูล GLOBAL_POSITION_INT (GPS)
+            msg = self.master.recv_match(
+                type='GLOBAL_POSITION_INT',
+                blocking=False
+            )
+            
+            if msg:
+                return {
+                    'lat': msg.lat / 1e7,      # Convert to degrees
+                    'lon': msg.lon / 1e7,
+                    'alt': msg.relative_alt / 1000.0,  # Convert to meters
+                    'hdg': msg.hdg / 100.0     # Heading in degrees
+                }
+            return None
+        except Exception as e:
+            log.error(f"[PIXHAWK] Read GPS error: {e}")
+            return None
+    
+    def read_attitude(self):
+        """
+        อ่าน Attitude (roll, pitch, yaw)
+        
+        Returns:
+            dict: {"roll": ..., "pitch": ..., "yaw": ...}
+        """
+        if not self.connected:
+            return None
+        
+        try:
+            msg = self.master.recv_match(
+                type='ATTITUDE',
+                blocking=False
+            )
+            
+            if msg:
+                return {
+                    'roll': msg.roll,
+                    'pitch': msg.pitch,
+                    'yaw': msg.yaw
+                }
+            return None
+        except Exception as e:
+            log.error(f"[PIXHAWK] Read attitude error: {e}")
+            return None
+    
+    def read_battery(self):
+        """
+        อ่าน Battery status
+        
+        Returns:
+            dict: {"voltage": ..., "current": ..., "remaining": ...}
+        """
+        if not self.connected:
+            return None
+        
+        try:
+            msg = self.master.recv_match(
+                type='BATTERY_STATUS',
+                blocking=False
+            )
+            
+            if msg:
+                return {
+                    'voltage': msg.voltages[0] / 1000.0,  # mV to V
+                    'current': msg.current_battery / 100.0,  # cA to A
+                    'remaining': msg.battery_remaining  # percentage
+                }
+            return None
+        except Exception as e:
+            log.error(f"[PIXHAWK] Read battery error: {e}")
+            return None
+    
+    def read_all(self):
+        """
+        อ่านข้อมูลทั้งหมด (GPS + Attitude + Battery)
+        
+        Returns:
+            dict: combined data
+        """
+        data = {}
+        
+        gps = self.read_gps()
+        if gps:
+            data.update(gps)
+        
+        att = self.read_attitude()
+        if att:
+            data.update(att)
+        
+        bat = self.read_battery()
+        if bat:
+            data.update(bat)
+        
+        return data if data else None
+    
+    def send_command_long(self, command_id, param1=0, param2=0):
+        """
+        ส่ง command ไปยัง Pixhawk
+        
+        Args:
+            command_id: MAV_CMD enum (e.g., MAV_CMD_DO_CHANGE_MODE)
+            param1, param2: parameters
+        """
+        if not self.connected:
+            log.error("[PIXHAWK] Not connected")
+            return False
+        
+        try:
+            self.master.mav.command_long_send(
+                target_system=1,
+                target_component=1,
+                command=command_id,
+                confirmation=0,
+                param1=param1,
+                param2=param2,
+                param3=0, param4=0, param5=0, param6=0, param7=0
+            )
+            log.info(f"[PIXHAWK] Command sent: {command_id}")
+            return True
+        except Exception as e:
+            log.error(f"[PIXHAWK] Send command error: {e}")
+            return False
+    
+    def set_mode(self, mode_name):
+        """
+        เปลี่ยน flight mode
+        
+        Args:
+            mode_name: "STABILIZE", "LOITER", "AUTO", etc.
+        """
+        if not self.connected:
+            return False
+        
+        # Mode ID mapping สำหรับ ArduBoat
+        mode_map = {
+            'MANUAL': 0,
+            'ACRO': 1,
+            'STEERING': 3,
+            'HOLD': 4,
+            'LOITER': 5,
+            'FOLLOW': 6,
+            'SIMPLE': 7,
+            'AUTO': 10,
+            'RTL': 11,
+            'CIRCLE': 14,
+            'GUIDED': 15,
+            'INITIALIZING': 16
+        }
+        
+        mode_id = mode_map.get(mode_name.upper())
+        if mode_id is None:
+            log.error(f"[PIXHAWK] Unknown mode: {mode_name}")
+            return False
+        
+        try:
+            self.master.mav.set_mode_send(
+                target_system=1,
+                base_mode=0,
+                custom_mode=mode_id
+            )
+            log.info(f"[PIXHAWK] Mode changed to: {mode_name}")
+            return True
+        except Exception as e:
+            log.error(f"[PIXHAWK] Set mode error: {e}")
+            return False
+    
+    def arm(self):
+        """ติด arm (ยอม motor ตัดไฟ)"""
+        return self.send_command_long(
+            command_id=400,  # MAV_CMD_COMPONENT_ARM_DISARM
+            param1=1  # arm
+        )
+    
+    def disarm(self):
+        """ถอด arm"""
+        return self.send_command_long(
+            command_id=400,
+            param1=0  # disarm
+        )
+    
+    def close(self):
+        """ปิด connection"""
+        if self.master:
+            self.master.close()
+            self.connected = False
+            log.info("[PIXHAWK] Connection closed")
+
+
+# TEST STANDALONE
+if __name__ == '__main__':
+    reader = PixhawkReader('/dev/ttyACM0', 115200)
+    
+    try:
+        print("[TEST] Reading Pixhawk data... (Ctrl+C to stop)")
+        while True:
+            data = reader.read_all()
+            if data:
+                print(f"GPS: {data.get('lat', 0):.4f}, {data.get('lon', 0):.4f} | "
+                      f"Heading: {data.get('hdg', 0):.0f}° | "
+                      f"Battery: {data.get('voltage', 0):.2f}V")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[TEST] Stopped")
+        reader.close()

@@ -152,6 +152,24 @@
   </div>
 </div>
 
+
+<div class="sampling-panel">
+  <h3>Sampling Status</h3>
+  
+  <div id="sampling-status">
+    <p>Status: <span id="status-text">Idle</span></p>
+    <p>Progress: <span id="status-progress">0%</span></p>
+    <p>Samples: <span id="status-samples">0</span></p>
+    <p>Remaining: <span id="status-remaining">-</span>s</p>
+  </div>
+  
+  <div id="sampling-controls">
+    <button id="btn-sampling-start">Start (30s)</button>
+    <button id="btn-sampling-stop" disabled>Stop</button>
+  </div>
+</div>
+
+
 <script type="module">
 import { pushPoint, loadHistory } from '{{ url_for("static", filename="charts.js") }}';
 
