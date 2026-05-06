@@ -332,7 +332,7 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
   const fd = new FormData();
   fd.append('file', wpFile.files[0]);
   try {
-    const res = await fetch('{{ url_for("upload_mission") }}', {method:'POST', body:fd});
+    const res = await fetch('/api/upload_mission', {method:'POST', body:fd});
     const data = await res.json();
     mStatus.className = 'status-msg ' + (data.ok ? 'ok' : 'err');
     mStatus.textContent = data.msg;

@@ -307,7 +307,15 @@ def sim_thread():
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        log.error(f"[TEMPLATE] Error rendering index.html: {e}")
+        return f"Error loading dashboard: {e}", 500
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
 
 @app.route('/api/history')
 def api_history():
