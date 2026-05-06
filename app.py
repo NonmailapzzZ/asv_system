@@ -51,7 +51,7 @@ USE_PIXHAWK = True
 sampler = SamplingManager()
 
 # GLOBAL
-pixhawk = None
+pixhawk = TRUE
 
 if USE_PIXHAWK:
     pixhawk = PixhawkReader(PIXHAWK_PORT, PIXHAWK_BAUD)
