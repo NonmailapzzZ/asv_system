@@ -336,6 +336,30 @@ def sampling_start(seconds):
         state['sampling_active'] = True
     return jsonify({'ok': True, 'msg': f'Sampling started for {seconds}s'})
 
+@app.route('/api/upload_mission', methods=['POST'])
+def upload_mission():
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'msg': 'ไม่มีไฟล์'}), 400
+    
+    f = request.files['file']
+    if not f.filename.endswith('.waypoints'):
+        return jsonify({'ok': False, 'msg': 'ต้องเป็นไฟล์ .waypoints'}), 400
+    
+    path = f'uploads/{f.filename}'
+    os.makedirs('uploads', exist_ok=True)
+    f.save(path)
+    
+    try:
+        waypoints = mm.parse_waypoints_file(path)
+        return jsonify({'ok': True, 'msg': f'Upload สำเร็จ {len(waypoints)} waypoints'})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+
+@app.route('/api/start_mission', methods=['POST'])
+def start_mission():
+    return jsonify({'ok': True, 'msg': 'Mission started'})
+
+
 @app.route('/api/sampling/stop', methods=['POST'])
 def sampling_stop():
     log.info("[API] Manual sampling stop")
