@@ -111,6 +111,25 @@ class PixhawkReader:
         except Exception as e:
             log.error(f"[PIXHAWK] Read battery error: {e}")
             return None
+
+    def read_mode(self):
+        """Read Pixhawk flight mode from MAVLink HEARTBEAT."""
+        if not self.connected:
+            return None
+
+        try:
+            msg = self.master.recv_match(
+                type='HEARTBEAT',
+                blocking=False
+            )
+
+            if msg:
+                mode = mavutil.mode_string_v10(msg)
+                return {'mode': mode.upper() if mode else 'UNKNOWN'}
+            return None
+        except Exception as e:
+            log.error(f"[PIXHAWK] Read mode error: {e}")
+            return None
     
     def read_all(self):
         """
@@ -120,6 +139,10 @@ class PixhawkReader:
             dict: combined data
         """
         data = {}
+
+        mode = self.read_mode()
+        if mode:
+            data.update(mode)
         
         gps = self.read_gps()
         if gps:

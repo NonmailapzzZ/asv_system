@@ -24,6 +24,7 @@
     </div>
     <div class="hdr-right">
       <div class="conn-badge"><div class="dot" id="dot-px"></div><span id="lbl-px">PIXHAWK</span></div>
+      <div class="mode-badge" id="pixhawk-mode">MODE --</div>
       <div class="conn-badge"><div class="dot" id="dot-ar"></div><span id="lbl-ar">ARDUINO</span></div>
       <div id="clock">--:--:--</div>
     </div>
@@ -262,6 +263,12 @@ function setText(id, val) { document.getElementById(id).textContent = val; }
 function setDot(id, on) {
   document.getElementById(id).className = 'dot ' + (on ? 'on' : '');
 }
+function setPixhawkMode(mode) {
+  const el = document.getElementById('pixhawk-mode');
+  const value = (mode || 'UNKNOWN').toUpperCase();
+  el.textContent = `MODE ${value}`;
+  el.className = 'mode-badge mode-' + value.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+}
 
 fetch('{{ url_for("api_history") }}')
 .then(r => r.json())
@@ -371,6 +378,7 @@ socket.on('sensor_update', d => {
 
   setDot('dot-px', d.pixhawk_ok);
   setDot('dot-ar', d.arduino_ok);
+  setPixhawkMode(d.pixhawk_mode);
 
   document.getElementById('map-link').href = `https://www.google.com/maps?q=${d.lat},${d.lon}`;
 

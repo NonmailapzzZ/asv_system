@@ -110,6 +110,7 @@ header {
 .panel-title,
 .g-lbl,
 .conn-badge,
+.mode-badge,
 #clock,
 .file-name,
 .status-msg,
@@ -143,6 +144,53 @@ button {
   background: rgba(15, 30, 43, .72);
   color: var(--muted);
   font-size: 11px;
+}
+
+.mode-badge {
+  min-height: 30px;
+  min-width: 92px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border: 1px solid rgba(36, 199, 232, .42);
+  border-radius: 8px;
+  background: rgba(36, 199, 232, .1);
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.mode-auto {
+  border-color: rgba(39, 214, 147, .48);
+  background: rgba(39, 214, 147, .12);
+  color: var(--green);
+}
+
+.mode-rtl,
+.mode-delay {
+  border-color: rgba(242, 180, 75, .55);
+  background: rgba(242, 180, 75, .13);
+  color: var(--amber);
+}
+
+.mode-error,
+.mode-disconnected,
+.mode-unavailable {
+  border-color: rgba(255, 93, 93, .5);
+  background: rgba(255, 93, 93, .12);
+  color: var(--danger);
+}
+
+.mode-manual,
+.mode-hold,
+.mode-loiter,
+.mode-guided,
+.mode-connected,
+.mode-sim {
+  border-color: rgba(134, 166, 184, .38);
+  background: rgba(134, 166, 184, .1);
+  color: var(--text);
 }
 
 .dot {

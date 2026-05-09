@@ -59,6 +59,7 @@ state = {
     'battery_voltage': 0.0,
     'battery_remaining': 0.0,
     'pixhawk_ok': False,
+    'pixhawk_mode': 'DISCONNECTED',
     'sampling_active': False,
     'sampling_progress': 0,
     'sampling_samples': 0,
@@ -143,6 +144,7 @@ def pixhawk_thread():
     global pixhawk, state, pixhawk_available
     
     delay_active = False
+    mode_before_delay = 'UNKNOWN'
     retry_count = 0
     max_retries = 3
     
@@ -153,6 +155,7 @@ def pixhawk_thread():
                 log.warning("[PIXHAWK] Module not available, skipping...")
                 with lock:
                     state['pixhawk_ok'] = False
+                    state['pixhawk_mode'] = 'UNAVAILABLE'
                 time.sleep(10)
                 continue
             
@@ -162,6 +165,7 @@ def pixhawk_thread():
                     pixhawk_available = False
                     with lock:
                         state['pixhawk_ok'] = False
+                        state['pixhawk_mode'] = 'DISCONNECTED'
                     time.sleep(10)
                     continue
                 
@@ -171,16 +175,21 @@ def pixhawk_thread():
                     if pixhawk.connected:
                         retry_count = 0
                         pixhawk_available = True
+                        with lock:
+                            state['pixhawk_ok'] = True
+                            state['pixhawk_mode'] = 'CONNECTED'
                         log.info("[PIXHAWK] Connected!")
                     else:
                         retry_count += 1
                         with lock:
                             state['pixhawk_ok'] = False
+                            state['pixhawk_mode'] = 'CONNECTING'
                 except Exception as e:
                     retry_count += 1
                     log.warning(f"[PIXHAWK] Connection attempt failed: {e}")
                     with lock:
                         state['pixhawk_ok'] = False
+                        state['pixhawk_mode'] = 'CONNECTING'
                 
                 time.sleep(5)
                 continue
@@ -199,6 +208,9 @@ def pixhawk_thread():
                     if 'voltage' in data:
                         state['battery_voltage'] = data['voltage']
                         state['battery_remaining'] = data['remaining']
+                    if 'mode' in data:
+                        if not delay_active:
+                            state['pixhawk_mode'] = data['mode']
                     state['pixhawk_ok'] = True
             
             # Detect Delay command
@@ -221,7 +233,9 @@ def pixhawk_thread():
                             sampler.start_sampling(duration)
                             delay_active = True
                             with lock:
+                                mode_before_delay = state.get('pixhawk_mode', 'UNKNOWN')
                                 state['sampling_active'] = True
+                                state['pixhawk_mode'] = 'DELAY'
                     
                     elif msg_type == 'COMMAND_ACK':
                         if msg.command == 184 and delay_active:
@@ -245,6 +259,7 @@ def pixhawk_thread():
                             delay_active = False
                             with lock:
                                 state['sampling_active'] = False
+                                state['pixhawk_mode'] = mode_before_delay
             
             except Exception as e:
                 log.debug(f"[PIXHAWK] Message processing error: {e}")
@@ -263,6 +278,7 @@ def pixhawk_thread():
             log.error(f"[PIXHAWK] Unexpected error: {e}")
             with lock:
                 state['pixhawk_ok'] = False
+                state['pixhawk_mode'] = 'ERROR'
             retry_count += 1
             time.sleep(5)
 
@@ -308,6 +324,7 @@ def sim_thread():
             state['do']        = round(6.5 + math.sin(t * 0.08) * 1.0, 2)
             state['temp']      = round(28.0 + math.sin(t * 0.03) * 2.0, 2)
             state['uart_ok']   = True
+            state['pixhawk_mode'] = 'SIM'
             state['ts']        = datetime.utcnow().strftime('%H:%M:%S')
 
         socketio.emit('sensor_update', dict(state))
