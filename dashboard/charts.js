@@ -15,6 +15,24 @@ function makeDataset(label, color, data) {
   };
 }
 
+async function exportByDateRange(startDate, endDate) {
+  const response = await fetch('/api/export/date_range_download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      start_date: startDate,
+      end_date: endDate
+    })
+  });
+  
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'survey_data.csv';
+  a.click();
+}
+
 // Update sampling status ทุก 1 วินาที
 setInterval(async () => {
   const response = await fetch('/api/sampling/status');

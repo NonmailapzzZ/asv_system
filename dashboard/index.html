@@ -85,10 +85,10 @@
       </div>
     </div>
   </div>
-
+  
   <!-- MAIN -->
   <div class="main-grid">
-
+    
     <!-- CHARTS -->
     <div class="charts-col">
       <div class="panel">
@@ -145,12 +145,81 @@
       <div class="panel">
         <div class="panel-title">Data Export</div>
         <p style="font-size:11px;color:var(--muted);margin-bottom:10px">Export ข้อมูลทั้งหมด เป็น CSV</p>
-        <button class="btn btn-amber" id="btn-csv">Download CSV Log</button>
+        <div class="export-block">
+          <label class="field-label" for="export-session">Operation log</label>
+          <div class="inline-row">
+            <select id="export-session">
+              <option value="">No operation logs</option>
+            </select>
+            <button class="btn btn-primary btn-icon" id="btn-refresh-sessions" type="button">Scan</button>
+          </div>
+          <button class="btn btn-amber" id="btn-session-csv" disabled>Download Selected CSV</button>
+        </div>
+
+        <button class="btn btn-amber ghost" id="btn-csv">Download All CSV</button>
+        <div class="database-info" id="database-info">Loading database info...</div>
       </div>
 
     </div>
   </div>
 </div>
+
+<script>
+async function getDatabaseInfo() {
+  const info = document.getElementById('database-info');
+  try {
+    const response = await fetch('/api/database/info');
+    const data = await response.json();
+
+    if (data.ok) {
+      info.innerHTML = `
+        <span>Records: ${data.total_records}</span>
+        <span>From: ${data.earliest_record || '-'}</span>
+        <span>To: ${data.latest_record || '-'}</span>
+      `;
+    } else {
+      info.textContent = data.msg || 'Cannot read database info';
+    }
+  } catch (e) {
+    info.textContent = 'Database info error: ' + e.message;
+  }
+}
+
+async function loadOperationSessions() {
+  const select = document.getElementById('export-session');
+  const btn = document.getElementById('btn-session-csv');
+  select.innerHTML = '<option value="">Loading...</option>';
+  btn.disabled = true;
+
+  try {
+    const response = await fetch('/api/export/sessions');
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.msg || 'Cannot load sessions');
+
+    select.innerHTML = '';
+    if (!data.sessions.length) {
+      select.innerHTML = '<option value="">No operation logs</option>';
+      return;
+    }
+
+    data.sessions.forEach(session => {
+      const option = document.createElement('option');
+      option.value = session.id;
+      const count = session.record_count || 0;
+      option.textContent = `#${session.id} ${session.started_at} (${count} records)`;
+      option.disabled = count === 0;
+      select.appendChild(option);
+    });
+    btn.disabled = !select.value;
+  } catch (e) {
+    select.innerHTML = '<option value="">Session load error</option>';
+    console.error(e);
+  }
+}
+
+getDatabaseInfo();
+loadOperationSessions();
+</script>
 
 
 <div class="sampling-panel">
@@ -171,7 +240,7 @@
 
 
 <script type="module">
-import { pushPoint, loadHistory } from '{{ url_for("static", filename="charts.js") }}';
+  import { pushPoint, loadHistory } from '{{ url_for("static", filename="charts.js") }}';
 
 // Clock
 setInterval(() => {
@@ -195,9 +264,9 @@ function setDot(id, on) {
 }
 
 fetch('{{ url_for("api_history") }}')
-  .then(r => r.json())
-  .then(records => loadHistory(records))
-  .catch(()=>{});
+.then(r => r.json())
+.then(records => loadHistory(records))
+.catch(()=>{});
 
 // CAMERA
 const camSelect = document.getElementById('cam-select');
@@ -286,6 +355,7 @@ btnToggle.addEventListener('click', () => {
 btnScan.addEventListener('click', scanCameras);
 scanCameras();
 
+
 // SocketIO
 const socket = io();
 socket.on('sensor_update', d => {
@@ -312,6 +382,9 @@ socket.on('sensor_update', d => {
   log.prepend(row);
   while (log.children.length > 30) log.removeChild(log.lastChild);
 });
+
+
+
 
 // MISSION
 const wpFile = document.getElementById('wp-file');
@@ -352,6 +425,10 @@ document.getElementById('btn-start').addEventListener('click', async () => {
     const data = await res.json();
     mStatus.className = 'status-msg ' + (data.ok ? 'ok' : 'err');
     mStatus.textContent = data.msg;
+    if (data.ok) {
+      await loadOperationSessions();
+      await getDatabaseInfo();
+    }
   } catch(e) {
     mStatus.className = 'status-msg err';
     mStatus.textContent = 'Error: ' + e.message;
@@ -360,6 +437,32 @@ document.getElementById('btn-start').addEventListener('click', async () => {
 
 document.getElementById('btn-csv').addEventListener('click', () => {
   window.location.href = '{{ url_for("download_csv") }}';
+});
+
+document.getElementById('btn-refresh-sessions').addEventListener('click', loadOperationSessions);
+document.getElementById('export-session').addEventListener('change', e => {
+  document.getElementById('btn-session-csv').disabled = !e.target.value;
+});
+document.getElementById('btn-session-csv').addEventListener('click', () => {
+  const id = document.getElementById('export-session').value;
+  if (!id) return;
+  window.location.href = `/api/export/session_download/${id}`;
+});
+document.getElementById('btn-sampling-start').addEventListener('click', async () => {
+  const res = await fetch('/api/sampling/start/30', {method:'POST'});
+  const data = await res.json();
+  document.getElementById('btn-sampling-stop').disabled = !data.ok;
+  await loadOperationSessions();
+  if (!data.ok) alert(data.msg || 'Cannot start sampling');
+});
+
+document.getElementById('btn-sampling-stop').addEventListener('click', async () => {
+  const res = await fetch('/api/sampling/stop', {method:'POST'});
+  const data = await res.json();
+  document.getElementById('btn-sampling-stop').disabled = true;
+  await loadOperationSessions();
+  await getDatabaseInfo();
+  if (!data.ok) alert(data.msg || 'Cannot stop sampling');
 });
 </script>
 </body>

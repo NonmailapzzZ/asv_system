@@ -9,7 +9,7 @@ Flow:
 4. System continues normally without Pixhawk
 """
 
-import os, time, json, threading, logging, math
+import os, time, json, threading, logging, math, sqlite3
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, Response
 from flask_socketio import SocketIO
@@ -71,6 +71,15 @@ sampler = SamplingManager()
 pixhawk = None
 uart_reader = None
 pixhawk_available = False
+active_session_id = None
+
+def begin_operation_session(label=None, source='manual'):
+    """Mark the start of an operation for Mission Planner style export picking."""
+    global active_session_id
+    session = db.start_session(label=label, source=source)
+    active_session_id = session['id']
+    log.info(f"[SESSION] Started operation #{active_session_id}: {session['label']}")
+    return session
 
 # ===========================================================
 # UART THREAD
@@ -207,6 +216,8 @@ def pixhawk_thread():
                         if msg.command == 184:
                             duration = int(msg.param2)
                             log.info(f"[PIXHAWK] Delay detected: {duration}s")
+                            if active_session_id is None:
+                                begin_operation_session(source='pixhawk_delay')
                             sampler.start_sampling(duration)
                             delay_active = True
                             with lock:
@@ -223,7 +234,8 @@ def pixhawk_thread():
                                 try:
                                     db.insert_record(
                                         avg['lat'], avg['lon'], avg['depth'],
-                                        avg['ph'], avg['do'], avg['temp']
+                                        avg['ph'], avg['do'], avg['temp'],
+                                        active_session_id
                                     )
                                     log.info(f"[DB] Saved: depth={avg['depth']:.2f}m, temp={avg['temp']:.1f}C, pH={avg['ph']:.2f}")
                                     sampler.clear_samples()
@@ -330,6 +342,169 @@ def download_csv():
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 500
 
+@app.route('/api/export/sessions')
+def export_sessions():
+    try:
+        return jsonify({'ok': True, 'sessions': db.list_sessions()})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+
+@app.route('/api/export/session_download/<int:session_id>')
+def export_session_download(session_id):
+    try:
+        path = db.export_session(session_id)
+        return send_file(path, as_attachment=True,
+                         download_name=os.path.basename(path))
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+    
+@app.route('/api/export/date_range', methods=['POST'])
+def export_date_range():
+    """
+    Export CSV for specific date range
+    
+    Request body:
+    {
+        "start_date": "2024-12-15",
+        "end_date": "2024-12-16",
+        "filename": "custom_name.csv" (optional)
+    }
+    """
+    try:
+        data = request.get_json()
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        filename = data.get('filename')
+        
+        if not start_date or not end_date:
+            return jsonify({'ok': False, 'msg': 'start_date and end_date required'}), 400
+        
+        path = db.export_csv(filename=filename, start_date=start_date, end_date=end_date)
+        
+        return jsonify({
+            'ok': True,
+            'msg': 'Export successful',
+            'filename': os.path.basename(path),
+            'path': path
+        })
+    
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+ 
+@app.route('/api/export/time_range', methods=['POST'])
+def export_time_range():
+    """
+    Export CSV for specific time range (with hours/minutes)
+    
+    Request body:
+    {
+        "start_datetime": "2024-12-15 10:30:00",
+        "end_datetime": "2024-12-15 15:45:00",
+        "filename": "5-15-24_103000_to_154500.csv" (optional)
+    }
+    """
+    try:
+        data = request.get_json()
+        start_datetime = data.get('start_datetime')
+        end_datetime = data.get('end_datetime')
+        filename = data.get('filename')
+        
+        if not start_datetime or not end_datetime:
+            return jsonify({'ok': False, 'msg': 'start_datetime and end_datetime required'}), 400
+        
+        path = db.export_csv_custom(start_datetime, end_datetime, filename=filename)
+        
+        return jsonify({
+            'ok': True,
+            'msg': 'Export successful',
+            'filename': os.path.basename(path),
+            'path': path
+        })
+    
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+ 
+@app.route('/api/export/date_range_download', methods=['POST'])
+def export_date_range_download():
+    """
+    Export and download CSV for date range
+    
+    Request body:
+    {
+        "start_date": "2024-12-15",
+        "end_date": "2024-12-16"
+    }
+    """
+    try:
+        data = request.get_json()
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        
+        if not start_date or not end_date:
+            return jsonify({'ok': False, 'msg': 'start_date and end_date required'}), 400
+        
+        path = db.export_csv(filename=None, start_date=start_date, end_date=end_date)
+        
+        return send_file(path, as_attachment=True,
+                        download_name=os.path.basename(path))
+    
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+ 
+@app.route('/api/export/time_range_download', methods=['POST'])
+def export_time_range_download():
+    """
+    Export and download CSV for time range
+    
+    Request body:
+    {
+        "start_datetime": "2024-12-15 10:30:00",
+        "end_datetime": "2024-12-15 15:45:00"
+    }
+    """
+    try:
+        data = request.get_json()
+        start_datetime = data.get('start_datetime')
+        end_datetime = data.get('end_datetime')
+        
+        if not start_datetime or not end_datetime:
+            return jsonify({'ok': False, 'msg': 'start_datetime and end_datetime required'}), 400
+        
+        path = db.export_csv_custom(start_datetime, end_datetime)
+        
+        return send_file(path, as_attachment=True,
+                        download_name=os.path.basename(path))
+    
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+ 
+@app.route('/api/database/info')
+def database_info():
+    """
+    Get database information (date range, record count)
+    """
+    try:
+        conn = sqlite3.connect(db.DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) as count FROM asv_logs')
+        count = cursor.fetchone()[0]
+        
+        date_range = db.get_date_range()
+        
+        conn.close()
+        
+        return jsonify({
+            'ok': True,
+            'total_records': count,
+            'earliest_record': date_range['earliest'],
+            'latest_record': date_range['latest']
+        })
+    
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+
+
 # Sampling routes
 @app.route('/api/sampling/status')
 def sampling_status():
@@ -339,6 +514,8 @@ def sampling_status():
 @app.route('/api/sampling/start/<int:seconds>', methods=['POST'])
 def sampling_start(seconds):
     log.info(f"[API] Manual sampling start: {seconds}s")
+    if active_session_id is None:
+        begin_operation_session(source='manual_sampling')
     sampler.start_sampling(seconds)
     with lock:
         state['sampling_active'] = True
@@ -365,7 +542,12 @@ def upload_mission():
 
 @app.route('/api/start_mission', methods=['POST'])
 def start_mission():
-    return jsonify({'ok': True, 'msg': 'Mission started'})
+    session = begin_operation_session(source='mission')
+    return jsonify({
+        'ok': True,
+        'msg': f'Mission started - operation #{session["id"]}',
+        'session': session
+    })
 
 
 @app.route('/api/sampling/stop', methods=['POST'])
@@ -378,7 +560,8 @@ def sampling_stop():
         try:
             db.insert_record(
                 avg['lat'], avg['lon'], avg['depth'],
-                avg['ph'], avg['do'], avg['temp']
+                avg['ph'], avg['do'], avg['temp'],
+                active_session_id
             )
             log.info(f"[DB] Manual save: {avg['sample_count']} samples")
             sampler.clear_samples()
