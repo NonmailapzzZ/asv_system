@@ -41,6 +41,7 @@ FUSION_INTERVAL = 2.0
 USE_SIM         = False
 USE_PIXHAWK     = True
 DEFAULT_AUTO_SAMPLING_SECONDS = 30
+UART_STALE_SECONDS = 3.0
 
 # Flask setup
 app = Flask(__name__, 
@@ -56,6 +57,9 @@ state = {
     'depth': 0.0,
     'temp': 0.0, 'ph': 0.0, 'do': 0.0,
     'uart_ok': False,
+    'arduino_ok': False,
+    'arduino_status': 'error',
+    'arduino_error': 'No UART data',
     'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
     'battery_voltage': 0.0,
     'battery_remaining': 0.0,
@@ -154,20 +158,32 @@ def uart_thread():
         try:
             log.info("[UART] Initializing reader on /dev/ttyS0...")
             uart_reader = ArduinoUARTReader(UART_PORT, UART_BAUD)
+            last_valid_rx = 0
+            last_warn_rx = 0
+            last_warn_error = ''
             
             if not uart_reader.connected:
                 log.error("[UART] Failed to connect")
                 with lock:
                     state['uart_ok'] = False
+                    state['arduino_ok'] = False
+                    state['arduino_status'] = 'error'
+                    state['arduino_error'] = uart_reader.last_error or 'UART connection failed'
                 time.sleep(5)
                 continue
             
             log.info("[UART] Connected to Arduino")
             with lock:
-                state['uart_ok'] = True
+                state['uart_ok'] = False
+                state['arduino_ok'] = False
+                state['arduino_status'] = 'error'
+                state['arduino_error'] = 'Waiting for UART data'
             
-            for sensor_data in uart_reader.read_sensors_continuous(interval=0.1):
+            while uart_reader.connected:
+                sensor_data = uart_reader.read_sensor_data()
+                reader_status = uart_reader.last_status
                 if sensor_data:
+                    last_valid_rx = time.time()
                     with lock:
                         state['lat']   = sensor_data.get('lat',   state['lat'])
                         state['lon']   = sensor_data.get('lon',   state['lon'])
@@ -176,17 +192,44 @@ def uart_thread():
                         state['ph']    = sensor_data.get('ph',    state['ph'])
                         state['do']    = sensor_data.get('do',    state['do'])
                         state['uart_ok'] = True
+                        state['arduino_ok'] = True
+                        state['arduino_status'] = 'ok'
+                        state['arduino_error'] = ''
                     
                     sampler.add_sample(sensor_data)
                     log.debug(f"[UART] Lat={sensor_data['lat']:.4f}, Lon={sensor_data['lon']:.4f}")
-                else:
+                elif reader_status == 'warn':
+                    last_warn_rx = time.time()
+                    last_warn_error = uart_reader.last_error
+                    with lock:
+                        state['uart_ok'] = True
+                        state['arduino_ok'] = False
+                        state['arduino_status'] = 'warn'
+                        state['arduino_error'] = uart_reader.last_error
+                elif reader_status == 'error':
                     with lock:
                         state['uart_ok'] = False
+                        state['arduino_ok'] = False
+                        state['arduino_status'] = 'error'
+                        state['arduino_error'] = uart_reader.last_error
+                else:
+                    now = time.time()
+                    stale = last_valid_rx == 0 or (now - last_valid_rx) > UART_STALE_SECONDS
+                    warn_recent = last_warn_rx and (now - last_warn_rx) <= 2.0
+                    with lock:
+                        state['uart_ok'] = not stale
+                        state['arduino_ok'] = not stale and not warn_recent
+                        state['arduino_status'] = 'error' if stale else ('warn' if warn_recent else 'ok')
+                        state['arduino_error'] = 'No UART data' if stale else (last_warn_error if warn_recent else '')
+                time.sleep(0.1)
         
         except Exception as e:
             log.error(f"[UART] Error: {e}")
             with lock:
                 state['uart_ok'] = False
+                state['arduino_ok'] = False
+                state['arduino_status'] = 'error'
+                state['arduino_error'] = str(e)
             time.sleep(5)
 
 # ===========================================================
@@ -372,6 +415,9 @@ def sim_thread():
             state['do']        = round(6.5 + math.sin(t * 0.08) * 1.0, 2)
             state['temp']      = round(28.0 + math.sin(t * 0.03) * 2.0, 2)
             state['uart_ok']   = True
+            state['arduino_ok'] = True
+            state['arduino_status'] = 'ok'
+            state['arduino_error'] = ''
             state['pixhawk_mode'] = 'SIM'
             state['ts']        = datetime.utcnow().strftime('%H:%M:%S')
 

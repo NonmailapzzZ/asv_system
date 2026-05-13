@@ -204,6 +204,26 @@ button {
 .dot.on {
   background: var(--green);
   box-shadow: 0 0 10px rgba(39, 214, 147, .75);
+  animation: statusBlink 1s ease-in-out infinite;
+}
+
+.dot.arduino-ok {
+  background: var(--green);
+  box-shadow: 0 0 10px rgba(39, 214, 147, .75);
+  animation: statusBlink .9s ease-in-out infinite;
+}
+
+.dot.arduino-warn {
+  background: var(--amber);
+  box-shadow: 0 0 10px rgba(242, 180, 75, .75);
+  animation: statusBlink .55s ease-in-out infinite;
+}
+
+.dot.arduino-error,
+.dot.arduino-idle {
+  background: var(--danger);
+  box-shadow: 0 0 10px rgba(255, 93, 93, .72);
+}
 }
 
 #clock {
@@ -590,6 +610,11 @@ input:focus {
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: .45; transform: scale(.72); }
+}
+
+@keyframes statusBlink {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.74); }
 }
 
 @media (max-width: 1080px) {

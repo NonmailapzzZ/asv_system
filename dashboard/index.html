@@ -263,6 +263,14 @@ function setText(id, val) { document.getElementById(id).textContent = val; }
 function setDot(id, on) {
   document.getElementById(id).className = 'dot ' + (on ? 'on' : '');
 }
+function setArduinoStatus(status, error) {
+  const dot = document.getElementById('dot-ar');
+  const label = document.getElementById('lbl-ar');
+  const value = (status || 'error').toLowerCase();
+  dot.className = 'dot arduino-' + value;
+  label.textContent = value === 'ok' ? 'ARDUINO' : `ARDUINO ${value.toUpperCase()}`;
+  label.title = error || '';
+}
 function setPixhawkMode(mode) {
   const el = document.getElementById('pixhawk-mode');
   const value = (mode || 'UNKNOWN').toUpperCase();
@@ -377,7 +385,7 @@ socket.on('sensor_update', d => {
   setText('s-lon', d.lon.toFixed(6));
 
   setDot('dot-px', d.pixhawk_ok);
-  setDot('dot-ar', d.arduino_ok);
+  setArduinoStatus(d.arduino_status, d.arduino_error);
   setPixhawkMode(d.pixhawk_mode);
 
   document.getElementById('map-link').href = `https://www.google.com/maps?q=${d.lat},${d.lon}`;
