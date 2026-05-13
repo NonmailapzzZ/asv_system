@@ -268,30 +268,30 @@ void readPH() {
 // ===================================================
 
 void readDO() {
-  /**
-   * อ่านค่า DO (Dissolved Oxygen) จาก RS-LDO-N01-2-20
-   * 
-   * Output voltage:
-   * - 0.2V = 0 mg/L
-   * - 4.0V = 14 mg/L (saturated)
-   * 
-   * Formula:
-   * DO = (V - 0.2) / (4.0 - 0.2) * 14
-   * DO = (V - 0.2) / 3.8 * 14
-   */
+  // /**
+  //  * อ่านค่า DO (Dissolved Oxygen) จาก RS-LDO-N01-2-20
+  //  * 
+  //  * Output voltage:
+  //  * - 0.2V = 0 mg/L
+  //  * - 4.0V = 14 mg/L (saturated)
+  //  * 
+  //  * Formula:
+  //  * DO = (V - 0.2) / (4.0 - 0.2) * 14
+  //  * DO = (V - 0.2) / 3.8 * 14
+  //  */
   
-  int raw = analogRead(DO_PIN);
-  float voltage = raw * (DO_VREF / 1023.0);
+  // int raw = analogRead(DO_PIN);
+  // float voltage = raw * (DO_VREF / 1023.0);
   
-  float do_val = 0.0;
-  if (voltage > DO_MIN_MV) {
-    do_val = ((voltage - DO_MIN_MV) / (DO_MAX_MV - DO_MIN_MV)) * 14.0;
-  }
+  // float do_val = 0.0;
+  // if (voltage > DO_MIN_MV) {
+  //   do_val = ((voltage - DO_MIN_MV) / (DO_MAX_MV - DO_MIN_MV)) * 14.0;
+  // }
   
-  // Constrain to valid range
-  do_val = constrain(do_val, 0.0, 14.0);
+  // // Constrain to valid range
+  // do_val = constrain(do_val, 0.0, 14.0);
   
-  waterDO = applyMovingAverage(do_val, doBuffer);
+  waterDO = applyMovingAverage(0, doBuffer);
 }
 
 // ===================================================
@@ -366,6 +366,7 @@ void sendToRPi() {
   Serial.println();  // จบด้วย newline
   
   // Increment buffer index สำหรับ moving average
-  bufferIndex = (bufferIndex + 1) % FILTER_SIZE;
+  bufferIndex = (bufferIndex + 1) % FILTE
+  R_SIZE;
 }
 

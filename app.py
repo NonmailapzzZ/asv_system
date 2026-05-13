@@ -40,6 +40,7 @@ PIXHAWK_BAUD    = 115200
 FUSION_INTERVAL = 2.0
 USE_SIM         = False
 USE_PIXHAWK     = True
+DEFAULT_AUTO_SAMPLING_SECONDS = 30
 
 # Flask setup
 app = Flask(__name__, 
@@ -73,6 +74,7 @@ pixhawk = None
 uart_reader = None
 pixhawk_available = False
 active_session_id = None
+sampling_finish_lock = threading.Lock()
 
 def begin_operation_session(label=None, source='manual'):
     """Mark the start of an operation for Mission Planner style export picking."""
@@ -81,6 +83,61 @@ def begin_operation_session(label=None, source='manual'):
     active_session_id = session['id']
     log.info(f"[SESSION] Started operation #{active_session_id}: {session['label']}")
     return session
+
+def update_sampling_state(status=None):
+    """Mirror SamplingManager status into websocket state."""
+    if status is None:
+        status = sampler.get_status()
+    with lock:
+        state['sampling_active'] = status['active']
+        state['sampling_progress'] = status['progress']
+        state['sampling_samples'] = status['sample_count']
+        state['sampling_remaining'] = status['remaining']
+    return status
+
+def finish_sampling(reason='timer', force=False):
+    """Stop sampling, save the averaged sample, and return the system to Idle."""
+    with sampling_finish_lock:
+        status = sampler.get_status()
+        if not status['active']:
+            return {'ok': False, 'msg': 'Sampling is not active'}
+
+        result = sampler.stop_sampling()
+        log.info(f"[SAMPLING] Finish reason={reason}, samples={result['count']}")
+
+        avg = sampler.get_average_sample()
+        if avg:
+            try:
+                db.insert_record(
+                    avg['lat'], avg['lon'], avg['depth'],
+                    avg['ph'], avg['do'], avg['temp'],
+                    active_session_id
+                )
+                sampler.clear_samples()
+                update_sampling_state()
+                log.info(f"[DB] Saved average sample: {avg['sample_count']} samples")
+                return {
+                    'ok': True,
+                    'samples_collected': avg['sample_count'],
+                    'message': f'Saved {avg["sample_count"]} samples as 1 record'
+                }
+            except Exception as e:
+                update_sampling_state()
+                return {'ok': False, 'msg': f'DB error: {e}'}
+
+        update_sampling_state()
+        return {'ok': False, 'msg': 'No samples collected'}
+
+def sampling_watch_thread():
+    """Auto-stop sampling when its duration has elapsed."""
+    while True:
+        try:
+            status = update_sampling_state()
+            if status['active'] and status.get('remaining', 0) <= 0:
+                finish_sampling(reason='timer')
+        except Exception as e:
+            log.error(f"[SAMPLING] Watch error: {e}")
+        time.sleep(0.5)
 
 # ===========================================================
 # UART THREAD
@@ -144,6 +201,7 @@ def pixhawk_thread():
     global pixhawk, state, pixhawk_available
     
     delay_active = False
+    loiter_active = False
     mode_before_delay = 'UNKNOWN'
     retry_count = 0
     max_retries = 3
@@ -212,6 +270,17 @@ def pixhawk_thread():
                         if not delay_active:
                             state['pixhawk_mode'] = data['mode']
                     state['pixhawk_ok'] = True
+
+                mode = data.get('mode', '').upper()
+                if mode == 'LOITER' and not loiter_active and not sampler.get_status()['active']:
+                    log.info("[PIXHAWK] LOITER detected, starting auto sampling")
+                    if active_session_id is None:
+                        begin_operation_session(source='pixhawk_loiter')
+                    sampler.start_sampling(DEFAULT_AUTO_SAMPLING_SECONDS)
+                    loiter_active = True
+                    update_sampling_state()
+                elif mode != 'LOITER':
+                    loiter_active = False
             
             # Detect Delay command
             try:
@@ -226,51 +295,30 @@ def pixhawk_thread():
                     
                     if msg_type == 'COMMAND_LONG':
                         if msg.command == 184:
-                            duration = int(msg.param2)
+                            duration = int(msg.param2) if int(msg.param2) > 0 else DEFAULT_AUTO_SAMPLING_SECONDS
                             log.info(f"[PIXHAWK] Delay detected: {duration}s")
                             if active_session_id is None:
                                 begin_operation_session(source='pixhawk_delay')
-                            sampler.start_sampling(duration)
-                            delay_active = True
-                            with lock:
-                                mode_before_delay = state.get('pixhawk_mode', 'UNKNOWN')
-                                state['sampling_active'] = True
-                                state['pixhawk_mode'] = 'DELAY'
+                            if not sampler.get_status()['active']:
+                                sampler.start_sampling(duration)
+                                delay_active = True
+                                with lock:
+                                    mode_before_delay = state.get('pixhawk_mode', 'UNKNOWN')
+                                    state['pixhawk_mode'] = 'DELAY'
+                                update_sampling_state()
                     
                     elif msg_type == 'COMMAND_ACK':
                         if msg.command == 184 and delay_active:
                             log.info("[PIXHAWK] Delay ended")
-                            result = sampler.stop_sampling()
-                            log.info(f"[PIXHAWK] Collected {result['count']} samples")
-                            
-                            avg = sampler.get_average_sample()
-                            if avg:
-                                try:
-                                    db.insert_record(
-                                        avg['lat'], avg['lon'], avg['depth'],
-                                        avg['ph'], avg['do'], avg['temp'],
-                                        active_session_id
-                                    )
-                                    log.info(f"[DB] Saved: depth={avg['depth']:.2f}m, temp={avg['temp']:.1f}C, pH={avg['ph']:.2f}")
-                                    sampler.clear_samples()
-                                except Exception as e:
-                                    log.error(f"[DB] Save error: {e}")
-                            
+                            finish_sampling(reason='pixhawk_delay_ack')
                             delay_active = False
                             with lock:
-                                state['sampling_active'] = False
                                 state['pixhawk_mode'] = mode_before_delay
             
             except Exception as e:
                 log.debug(f"[PIXHAWK] Message processing error: {e}")
             
-            # Update sampling status
-            status = sampler.get_status()
-            with lock:
-                state['sampling_active'] = status['active']
-                state['sampling_progress'] = status['progress']
-                state['sampling_samples'] = status['sample_count']
-                state['sampling_remaining'] = status['remaining']
+            update_sampling_state()
             
             time.sleep(0.5)
         
@@ -534,8 +582,7 @@ def sampling_start(seconds):
     if active_session_id is None:
         begin_operation_session(source='manual_sampling')
     sampler.start_sampling(seconds)
-    with lock:
-        state['sampling_active'] = True
+    update_sampling_state()
     return jsonify({'ok': True, 'msg': f'Sampling started for {seconds}s'})
 
 @app.route('/api/upload_mission', methods=['POST'])
@@ -570,31 +617,8 @@ def start_mission():
 @app.route('/api/sampling/stop', methods=['POST'])
 def sampling_stop():
     log.info("[API] Manual sampling stop")
-    result = sampler.stop_sampling()
-    
-    avg = sampler.get_average_sample()
-    if avg:
-        try:
-            db.insert_record(
-                avg['lat'], avg['lon'], avg['depth'],
-                avg['ph'], avg['do'], avg['temp'],
-                active_session_id
-            )
-            log.info(f"[DB] Manual save: {avg['sample_count']} samples")
-            sampler.clear_samples()
-            
-            with lock:
-                state['sampling_active'] = False
-            
-            return jsonify({
-                'ok': True,
-                'samples_collected': avg['sample_count'],
-                'message': f'Saved {avg["sample_count"]} samples as 1 record'
-            })
-        except Exception as e:
-            return jsonify({'ok': False, 'msg': f'DB error: {e}'}), 500
-    else:
-        return jsonify({'ok': False, 'msg': 'No samples collected'}), 400
+    result = finish_sampling(reason='manual_stop', force=True)
+    return jsonify(result), (200 if result.get('ok') else 400)
 
 @app.route('/api/sampling/details')
 def sampling_details():
@@ -659,6 +683,7 @@ def on_connect():
 if __name__ == '__main__':
     db.init_db()
     log.info("[MAIN] Database initialized")
+    threading.Thread(target=sampling_watch_thread, daemon=True).start()
     
     if USE_SIM:
         log.warning("[MAIN] SIMULATION MODE")
