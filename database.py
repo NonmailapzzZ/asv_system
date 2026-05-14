@@ -67,15 +67,11 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
     if not os.path.isdir(LOG_DIR):
         return {'deleted': [], 'total_bytes': 0}
 
-    excluded = {
-        os.path.abspath(path)
-        for path in (exclude_paths or [])
-        if path
-    }
+    excluded = {os.path.abspath(path) for path in (exclude_paths or []) if path}
     
-    # แก้ไข: ใช้ Timestamp (วินาที) แทน Datetime Object
-    now_ts = time.time()
-    max_age_seconds = max_age_days * 24 * 60 * 60
+    # ดึงเวลาปัจจุบันแบบ UTC+7
+    now = datetime.now(TH_TZ)
+    max_age = timedelta(days=max_age_days)
     deleted = []
 
     def csv_files():
@@ -83,57 +79,54 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
         for name in os.listdir(LOG_DIR):
             path = os.path.join(LOG_DIR, name)
             abs_path = os.path.abspath(path)
-            if abs_path in excluded:
-                continue
-            if not os.path.isfile(path) or not name.lower().endswith('.csv'):
+            if abs_path in excluded or not name.lower().endswith('.csv'):
                 continue
             try:
                 stat = os.stat(path)
+                # แก้ไขตรงนี้: เปลี่ยนจาก utcfromtimestamp เป็น fromtimestamp พร้อมระบุ TH_TZ
+                mtime_dt = datetime.fromtimestamp(stat.st_mtime, tz=TH_TZ)
+                
+                files.append({
+                    'path': path,
+                    'name': name,
+                    'size': stat.st_size,
+                    'mtime': mtime_dt
+                })
             except OSError:
                 continue
-            files.append({
-                'path': path,
-                'name': name,
-                'size': stat.st_size,
-                'mtime': stat.st_mtime, # เก็บเป็น float วินาที
-            })
         return files
 
-    def remove_csv(path, name):
-        try:
-            os.remove(path)
-            deleted.append(name)
-            return True
-        except OSError:
-            return False
-
-    # ลบไฟล์ตามอายุ (ตัวเลขลบตัวเลข)
+    # ลบไฟล์ที่เก่าเกินกำหนด (คราวนี้ลบได้เพราะเป็น Aware Datetime ทั้งคู่)
     for item in csv_files():
-        if now_ts - item['mtime'] > max_age_seconds:
-            remove_csv(item['path'], item['name'])
+        if now - item['mtime'] > max_age:
+            try:
+                os.remove(item['path'])
+                deleted.append(item['name'])
+            except OSError:
+                pass
 
-    # จัดการขนาดไฟล์รวม
-    files = sorted(csv_files(), key=lambda item: item['mtime'])
-    total_bytes = sum(item['size'] for item in files)
-
-    for item in files:
-        if total_bytes <= max_total_bytes:
-            break
-        if remove_csv(item['path'], item['name']):
-            total_bytes -= item['size']
+    # ส่วนการจัดการขนาดไฟล์รวมยังคงเดิม...
+    files = sorted(csv_files(), key=lambda x: x['mtime'])
+    total_bytes = sum(f['size'] for f in files)
+    for f in files:
+        if total_bytes <= max_total_bytes: break
+        try:
+            os.remove(f['path'])
+            deleted.append(f['name'])
+            total_bytes -= f['size']
+        except OSError: pass
 
     return {'deleted': deleted, 'total_bytes': total_bytes}
 
 def insert_record(lat, lon, depth, ph, do_val, temp, session_id=None):
     # ป้องกัน Errno 2: สร้างโฟลเดอร์ logs ก่อนเสมอ
     os.makedirs(LOG_DIR, exist_ok=True)
-    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     # บันทึกเป็นเวลาไทย UTC+7
-    timestamp = datetime.now(TH_TZ).strftime('%Y-%m-%d %H:%M:%S')
-    
+    timestamp = datetime.now(TH_TZ).strftime('%Y-%m-%d %H:%M:%S') 
+       
     cursor.execute('''
         INSERT INTO asv_logs 
         (timestamp, session_id, lat, lon, depth, ph, do_val, temp)
