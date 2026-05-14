@@ -10,15 +10,18 @@ Modified to support:
 import sqlite3
 import csv
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 CSV_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 CSV_MAX_AGE_DAYS = 21
+
+TH_TZ = timezone(timedelta(hours=7))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # ตั้งค่า LOG_DIR ให้ไปที่โฟลเดอร์ logs ในโปรเจกต์
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 DB_PATH = os.path.join(LOG_DIR, 'asv_data.db')
+
 
 def init_db():
     """Initialize database with asv_logs table"""
@@ -77,7 +80,7 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
         for path in (exclude_paths or [])
         if path
     }
-    now = datetime.utcnow()
+    now = datetime.now(TH_TZ)
     max_age = timedelta(days=max_age_days)
     deleted = []
 
@@ -138,7 +141,7 @@ def insert_record(lat, lon, depth, ph, do_val, temp, session_id=None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = datetime.now(TH_TZ).strftime('%Y-%m-%d %H:%M:%S')
     
     cursor.execute('''
         INSERT INTO asv_logs 
@@ -154,9 +157,9 @@ def start_session(label=None, source='manual'):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    started_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    started_at = datetime.now(TH_TZ).strftime('%Y-%m-%d %H:%M:%S')
     if not label:
-        label = f"Operation {datetime.utcnow().strftime('%d-%m-%y %H:%M:%S')}"
+        label = f"Operation {datetime.now(TH_TZ).strftime('%d-%m-%y %H:%M:%S')}"
 
     cursor.execute('''
         INSERT INTO operation_sessions (started_at, label, source)
@@ -294,7 +297,7 @@ def export_csv(filename=None, start_date=None, end_date=None):
         Path to exported CSV file
     """
     if filename is None:
-        now = datetime.utcnow()
+        now = datetime.now(TH_TZ)
         filename = f"asv_log_{now.strftime('%d-%m-%y_%H%M%S')}.csv"
     
     filepath = os.path.join(LOG_DIR, filename)
