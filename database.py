@@ -12,10 +12,13 @@ import csv
 import os
 from datetime import datetime, timedelta
 
-DB_PATH = 'logs/asv_data.db'
-LOG_DIR = 'logs'
 CSV_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 CSV_MAX_AGE_DAYS = 21
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ตั้งค่า LOG_DIR ให้ไปที่โฟลเดอร์ logs ในโปรเจกต์
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+DB_PATH = os.path.join(LOG_DIR, 'asv_data.db')
 
 def init_db():
     """Initialize database with asv_logs table"""
