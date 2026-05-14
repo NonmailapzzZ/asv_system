@@ -11,6 +11,7 @@ import sqlite3
 import csv
 import os
 from datetime import datetime, timedelta, timezone
+import time
 
 CSV_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 CSV_MAX_AGE_DAYS = 21
@@ -63,15 +64,6 @@ def init_db():
     cleanup_csv_logs()
 
 def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_AGE_DAYS, exclude_paths=None):
-    """
-    Remove old CSV exports from logs/.
-
-    Policy:
-    1. Delete CSV files older than max_age_days.
-    2. If remaining CSV files exceed max_total_bytes, delete oldest first.
-
-    Only .csv files are considered. The SQLite database is never removed.
-    """
     if not os.path.isdir(LOG_DIR):
         return {'deleted': [], 'total_bytes': 0}
 
@@ -80,8 +72,10 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
         for path in (exclude_paths or [])
         if path
     }
-    now = datetime.now(TH_TZ)
-    max_age = timedelta(days=max_age_days)
+    
+    # แก้ไข: ใช้ Timestamp (วินาที) แทน Datetime Object
+    now_ts = time.time()
+    max_age_seconds = max_age_days * 24 * 60 * 60
     deleted = []
 
     def csv_files():
@@ -101,7 +95,7 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
                 'path': path,
                 'name': name,
                 'size': stat.st_size,
-                'mtime': datetime.utcfromtimestamp(stat.st_mtime),
+                'mtime': stat.st_mtime, # เก็บเป็น float วินาที
             })
         return files
 
@@ -113,10 +107,12 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
         except OSError:
             return False
 
+    # ลบไฟล์ตามอายุ (ตัวเลขลบตัวเลข)
     for item in csv_files():
-        if now - item['mtime'] > max_age:
+        if now_ts - item['mtime'] > max_age_seconds:
             remove_csv(item['path'], item['name'])
 
+    # จัดการขนาดไฟล์รวม
     files = sorted(csv_files(), key=lambda item: item['mtime'])
     total_bytes = sum(item['size'] for item in files)
 
@@ -126,21 +122,16 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
         if remove_csv(item['path'], item['name']):
             total_bytes -= item['size']
 
-    for path in excluded:
-        if not os.path.isfile(path) or not path.lower().endswith('.csv'):
-            continue
-        try:
-            total_bytes += os.path.getsize(path)
-        except OSError:
-            continue
-
     return {'deleted': deleted, 'total_bytes': total_bytes}
 
 def insert_record(lat, lon, depth, ph, do_val, temp, session_id=None):
-    """Insert sensor record with current timestamp"""
+    # ป้องกัน Errno 2: สร้างโฟลเดอร์ logs ก่อนเสมอ
+    os.makedirs(LOG_DIR, exist_ok=True)
+    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    # บันทึกเป็นเวลาไทย UTC+7
     timestamp = datetime.now(TH_TZ).strftime('%Y-%m-%d %H:%M:%S')
     
     cursor.execute('''
@@ -153,13 +144,17 @@ def insert_record(lat, lon, depth, ph, do_val, temp, session_id=None):
     conn.close()
 
 def start_session(label=None, source='manual'):
-    """Create an operation session marker used for selectable CSV export."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    started_at = datetime.now(TH_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    # ใช้เวลาไทย UTC+7
+    now_th = datetime.now(TH_TZ)
+    started_at = now_th.strftime('%Y-%m-%d %H:%M:%S')
+    
     if not label:
-        label = f"Operation {datetime.now(TH_TZ).strftime('%d-%m-%y %H:%M:%S')}"
+        label = f"Operation {now_th.strftime('%d-%m-%y %H:%M:%S')}"
 
     cursor.execute('''
         INSERT INTO operation_sessions (started_at, label, source)
