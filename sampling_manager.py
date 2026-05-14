@@ -109,6 +109,7 @@ class SamplingManager:
         - ถ้า sampling_active = False → ข้าม (ไม่เก็บ)
         """
         if not self.sampling_active:
+            log.debug(f"[SAMPLER] Sampling not active, skipping sample (active={self.sampling_active})")
             return  # ไม่รับค่า ถ้าไม่ได้อยู่ใน sampling mode
         
         with self.lock:

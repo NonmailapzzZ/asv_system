@@ -10,7 +10,7 @@ Flow:
 """
 
 import os, time, json, threading, logging, math, sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta    
 from flask import Flask, render_template, request, jsonify, send_file, Response
 from flask_socketio import SocketIO
 
@@ -42,6 +42,9 @@ USE_SIM         = False
 USE_PIXHAWK     = True
 DEFAULT_AUTO_SAMPLING_SECONDS = 30
 UART_STALE_SECONDS = 3.0
+
+now_thailand = datetime.utcnow() + timedelta(hours=7)
+
 
 # Flask setup
 app = Flask(__name__, 
@@ -152,8 +155,7 @@ def uart_thread():
     Read sensor data from Arduino via UART
     Add to sampler buffer (don't write to SQL here)
     """
-    global uart_reader, state
-    
+    global uart_reader, state    
     while True:
         try:
             log.info("[UART] Initializing reader on /dev/ttyS0...")
@@ -387,7 +389,7 @@ def fusion_thread():
         
         with lock:
             snap = dict(state)
-            snap['ts'] = datetime.utcnow().strftime('%H:%M:%S')
+            snap['ts'] = now_thailand.strftime('%H:%M:%S')
             state['ts'] = snap['ts']
         
         try:
@@ -419,7 +421,7 @@ def sim_thread():
             state['arduino_status'] = 'ok'
             state['arduino_error'] = ''
             state['pixhawk_mode'] = 'SIM'
-            state['ts']        = datetime.utcnow().strftime('%H:%M:%S')
+            state['ts']        = now_thailand.strftime('%H:%M:%S')
 
         socketio.emit('sensor_update', dict(state))
         time.sleep(FUSION_INTERVAL)
@@ -448,8 +450,17 @@ def api_history():
 def download_csv():
     try:
         path = db.export_csv()
-        return send_file(path, as_attachment=True,
-                         download_name=os.path.basename(path))
+        
+        # ตั้ง headers สำหรับ ngrok
+        response = send_file(path, as_attachment=True,
+                            download_name=os.path.basename(path))
+        response.headers['Content-Type'] = 'text/csv; charset=utf-8'
+        response.headers['Content-Disposition'] = f'attachment; filename="{os.path.basename(path)}"'
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        
+        return response
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 500
 
@@ -537,15 +548,6 @@ def export_time_range():
  
 @app.route('/api/export/date_range_download', methods=['POST'])
 def export_date_range_download():
-    """
-    Export and download CSV for date range
-    
-    Request body:
-    {
-        "start_date": "2024-12-15",
-        "end_date": "2024-12-16"
-    }
-    """
     try:
         data = request.get_json()
         start_date = data.get('start_date')
@@ -556,23 +558,19 @@ def export_date_range_download():
         
         path = db.export_csv(filename=None, start_date=start_date, end_date=end_date)
         
-        return send_file(path, as_attachment=True,
-                        download_name=os.path.basename(path))
-    
+        response = send_file(path, as_attachment=True,
+                            download_name=os.path.basename(path))
+        response.headers['Content-Type'] = 'text/csv; charset=utf-8'
+        response.headers['Content-Disposition'] = f'attachment; filename="{os.path.basename(path)}"'
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        
+        return response
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 500
  
+
 @app.route('/api/export/time_range_download', methods=['POST'])
 def export_time_range_download():
-    """
-    Export and download CSV for time range
-    
-    Request body:
-    {
-        "start_datetime": "2024-12-15 10:30:00",
-        "end_datetime": "2024-12-15 15:45:00"
-    }
-    """
     try:
         data = request.get_json()
         start_datetime = data.get('start_datetime')
@@ -583,9 +581,13 @@ def export_time_range_download():
         
         path = db.export_csv_custom(start_datetime, end_datetime)
         
-        return send_file(path, as_attachment=True,
-                        download_name=os.path.basename(path))
-    
+        response = send_file(path, as_attachment=True,
+                            download_name=os.path.basename(path))
+        response.headers['Content-Type'] = 'text/csv; charset=utf-8'
+        response.headers['Content-Disposition'] = f'attachment; filename="{os.path.basename(path)}"'
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        
+        return response
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 500
  
