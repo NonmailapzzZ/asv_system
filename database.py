@@ -38,6 +38,11 @@ def init_db():
             session_id INTEGER,
             lat REAL,
             lon REAL,
+            garmin_lat REAL,
+            garmin_lon REAL,
+            pixhawk_lat REAL,
+            pixhawk_lon REAL,
+            gps_error REAL,
             depth REAL,
             ph REAL,
             do_val REAL,
@@ -49,6 +54,12 @@ def init_db():
     columns = [row[1] for row in cursor.fetchall()]
     if 'session_id' not in columns:
         cursor.execute('ALTER TABLE asv_logs ADD COLUMN session_id INTEGER')
+    if 'garmin_lat' not in columns:
+        cursor.execute('ALTER TABLE asv_logs ADD COLUMN garmin_lat REAL')
+        cursor.execute('ALTER TABLE asv_logs ADD COLUMN garmin_lon REAL')
+        cursor.execute('ALTER TABLE asv_logs ADD COLUMN pixhawk_lat REAL')
+        cursor.execute('ALTER TABLE asv_logs ADD COLUMN pixhawk_lon REAL')
+        cursor.execute('ALTER TABLE asv_logs ADD COLUMN gps_error REAL')
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS operation_sessions (
@@ -119,7 +130,8 @@ def cleanup_csv_logs(max_total_bytes=CSV_MAX_TOTAL_BYTES, max_age_days=CSV_MAX_A
 
     return {'deleted': deleted, 'total_bytes': total_bytes}
 
-def insert_record(lat, lon, depth, ph, do_val, temp, session_id=None):
+def insert_record(lat, lon, depth, ph, do_val, temp, session_id=None, 
+                  garmin_lat=0.0, garmin_lon=0.0, pixhawk_lat=0.0, pixhawk_lon=0.0, gps_error=0.0):
     # ป้องกัน Errno 2: สร้างโฟลเดอร์ logs ก่อนเสมอ
     os.makedirs(LOG_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -130,9 +142,9 @@ def insert_record(lat, lon, depth, ph, do_val, temp, session_id=None):
        
     cursor.execute('''
         INSERT INTO asv_logs 
-        (timestamp, session_id, lat, lon, depth, ph, do_val, temp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (timestamp, session_id, lat, lon, depth, ph, do_val, temp))
+        (timestamp, session_id, lat, lon, garmin_lat, garmin_lon, pixhawk_lat, pixhawk_lon, gps_error, depth, ph, do_val, temp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (timestamp, session_id, lat, lon, garmin_lat, garmin_lon, pixhawk_lat, pixhawk_lon, gps_error, depth, ph, do_val, temp))
     
     conn.commit()
     conn.close()
@@ -198,7 +210,7 @@ def get_recent(limit=50):
     cursor = conn.cursor()
     
     cursor.execute('''
-        SELECT id, timestamp, lat, lon, depth, ph, do_val, temp
+        SELECT id, timestamp, lat, lon, garmin_lat, garmin_lon, pixhawk_lat, pixhawk_lon, gps_error, depth, ph, do_val, temp
         FROM asv_logs
         ORDER BY id DESC
         LIMIT ?
@@ -230,7 +242,7 @@ def get_by_date_range(start_date, end_date):
         end_date = end_date.strftime('%Y-%m-%d')
     
     cursor.execute('''
-        SELECT id, timestamp, lat, lon, depth, ph, do_val, temp
+        SELECT id, timestamp, lat, lon, garmin_lat, garmin_lon, pixhawk_lat, pixhawk_lon, gps_error, depth, ph, do_val, temp
         FROM asv_logs
         WHERE DATE(timestamp) BETWEEN ? AND ?
         ORDER BY timestamp ASC
@@ -262,7 +274,7 @@ def get_by_time_range(start_datetime, end_datetime):
         end_datetime = end_datetime.strftime('%Y-%m-%d %H:%M:%S')
     
     cursor.execute('''
-        SELECT id, timestamp, lat, lon, depth, ph, do_val, temp
+        SELECT id, timestamp, lat, lon, garmin_lat, garmin_lon, pixhawk_lat, pixhawk_lon, gps_error, depth, ph, do_val, temp
         FROM asv_logs
         WHERE timestamp BETWEEN ? AND ?
         ORDER BY timestamp ASC
@@ -297,7 +309,7 @@ def export_csv(filename=None, start_date=None, end_date=None):
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute('SELECT id, timestamp, session_id, lat, lon, depth, ph, do_val, temp FROM asv_logs ORDER BY timestamp ASC')
+        cursor.execute('SELECT id, timestamp, session_id, lat, lon, garmin_lat, garmin_lon, pixhawk_lat, pixhawk_lon, gps_error, depth, ph, do_val, temp FROM asv_logs ORDER BY timestamp ASC')
         records = [dict(row) for row in cursor.fetchall()]
         conn.close()
     
@@ -305,7 +317,8 @@ def export_csv(filename=None, start_date=None, end_date=None):
         raise ValueError("No records found to export")
     
     with open(filepath, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['id', 'timestamp', 'session_id', 'lat', 'lon', 'depth', 'ph', 'do_val', 'temp'])
+        fieldnames = ['id', 'timestamp', 'session_id', 'lat', 'lon', 'garmin_lat', 'garmin_lon', 'pixhawk_lat', 'pixhawk_lon', 'gps_error', 'depth', 'ph', 'do_val', 'temp']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
 
@@ -346,7 +359,8 @@ def export_csv_custom(start_datetime, end_datetime, filename=None):
         raise ValueError(f"No records found between {start_datetime} and {end_datetime}")
     
     with open(filepath, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['id', 'timestamp', 'lat', 'lon', 'depth', 'ph', 'do_val', 'temp'])
+        fieldnames = ['id', 'timestamp', 'lat', 'lon', 'garmin_lat', 'garmin_lon', 'pixhawk_lat', 'pixhawk_lon', 'gps_error', 'depth', 'ph', 'do_val', 'temp']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
 
@@ -367,7 +381,7 @@ def export_session(session_id, filename=None):
         raise ValueError("Operation session not found")
 
     cursor.execute('''
-        SELECT id, timestamp, session_id, lat, lon, depth, ph, do_val, temp
+        SELECT id, timestamp, session_id, lat, lon, garmin_lat, garmin_lon, pixhawk_lat, pixhawk_lon, gps_error, depth, ph, do_val, temp
         FROM asv_logs
         WHERE session_id = ?
         ORDER BY timestamp ASC
@@ -384,7 +398,8 @@ def export_session(session_id, filename=None):
 
     filepath = os.path.join(LOG_DIR, filename)
     with open(filepath, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['id', 'timestamp', 'session_id', 'lat', 'lon', 'depth', 'ph', 'do_val', 'temp'])
+        fieldnames = ['id', 'timestamp', 'session_id', 'lat', 'lon', 'garmin_lat', 'garmin_lon', 'pixhawk_lat', 'pixhawk_lon', 'gps_error', 'depth', 'ph', 'do_val', 'temp']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
 

@@ -122,6 +122,13 @@
           <div class="gps-field"><div class="lbl">LAT</div><div class="val" id="s-lat">--</div></div>
           <div class="gps-field"><div class="lbl">LON</div><div class="val" id="s-lon">--</div></div>
         </div>
+        <div id="gps-status-row" style="font-family:'Share Tech Mono',monospace;font-size:11px;margin:8px 0;display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border);padding-top:8px">
+          <div style="display:flex;align-items:center;gap:5px">
+            <div class="dot" id="dot-gps-match"></div>
+            <span>GPS MATCH</span>
+          </div>
+          <div id="gps-error-val" style="color:var(--muted)">ERR: 0.0m</div>
+        </div>
         <a id="map-link" href="#" target="_blank">
           <button class="btn btn-primary">Open in Google Maps</button>
         </a>
@@ -371,6 +378,32 @@ btnScan.addEventListener('click', scanCameras);
 scanCameras();
 
 
+function setGPSStatus(status, match, error_m) {
+  const dot = document.getElementById('dot-gps-match');
+  const errEl = document.getElementById('gps-error-val');
+  
+  // Clear classes
+  dot.className = 'dot';
+  
+  if (status === 'no_fix') {
+    dot.classList.add('gps-no-fix');
+    errEl.textContent = 'ALL GPS LOST';
+    errEl.style.color = 'var(--danger)';
+  } else if (status === 'no_garmin') {
+    dot.classList.add('gps-no-garmin');
+    errEl.textContent = 'GARMIN NO FIX';
+    errEl.style.color = 'var(--amber)';
+  } else if (status === 'warn') {
+    dot.classList.add('gps-warn');
+    errEl.textContent = `ERR: ${error_m}m`;
+    errEl.style.color = 'var(--amber)';
+  } else {
+    dot.classList.add('gps-ok');
+    errEl.textContent = `ERR: ${error_m}m`;
+    errEl.style.color = 'var(--muted)';
+  }
+}
+
 // SocketIO
 const socket = io();
 socket.on('sensor_update', d => {
@@ -385,6 +418,8 @@ socket.on('sensor_update', d => {
   setText('s-lon', d.lon.toFixed(6));
 
   setDot('dot-px', d.pixhawk_ok);
+  setGPSStatus(d.gps_status, d.gps_match, d.gps_error_m);
+  
   setArduinoStatus(d.arduino_status, d.arduino_error);
   setPixhawkMode(d.pixhawk_mode);
 

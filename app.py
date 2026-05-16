@@ -57,6 +57,11 @@ socketio = SocketIO(app, cors_allowed_origins='*', async_mode='eventlet')
 lock = threading.Lock()
 state = {
     'lat': 0.0, 'lon': 0.0,
+    'garmin_lat': 0.0, 'garmin_lon': 0.0,
+    'pixhawk_lat': 0.0, 'pixhawk_lon': 0.0,
+    'gps_match': True,
+    'gps_error_m': 0.0,
+    'gps_status': 'ok',
     'depth': 0.0,
     'temp': 0.0, 'ph': 0.0, 'do': 0.0,
     'uart_ok': False,
@@ -83,6 +88,16 @@ uart_reader = None
 pixhawk_available = False
 active_session_id = None
 sampling_finish_lock = threading.Lock()
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance in meters between two GPS points."""
+    if not all([lat1, lon1, lat2, lon2]): return 0.0
+    R = 6371000  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 def begin_operation_session(label=None, source='manual'):
     """Mark the start of an operation for Mission Planner style export picking."""
@@ -119,7 +134,12 @@ def finish_sampling(reason='timer', force=False):
                 db.insert_record(
                     avg['lat'], avg['lon'], avg['depth'],
                     avg['ph'], avg['do'], avg['temp'],
-                    active_session_id
+                    active_session_id,
+                    garmin_lat=state['garmin_lat'],
+                    garmin_lon=state['garmin_lon'],
+                    pixhawk_lat=state['pixhawk_lat'],
+                    pixhawk_lon=state['pixhawk_lon'],
+                    gps_error=state['gps_error_m']
                 )
                 sampler.clear_samples()
                 update_sampling_state()
@@ -188,8 +208,13 @@ def uart_thread():
                 if sensor_data:
                     last_valid_rx = time.time()
                     with lock:
-                        state['lat']   = sensor_data.get('lat',   state['lat'])
-                        state['lon']   = sensor_data.get('lon',   state['lon'])
+                        state['garmin_lat'] = sensor_data.get('lat', 0.0)
+                        state['garmin_lon'] = sensor_data.get('lon', 0.0)
+                        
+                        # Use Garmin as primary lat/lon if Pixhawk not available or for sensor consistency
+                        state['lat']   = state['garmin_lat']
+                        state['lon']   = state['garmin_lon']
+                        
                         state['depth'] = sensor_data.get('depth', state['depth'])
                         state['temp']  = sensor_data.get('temp',  state['temp'])
                         state['ph']    = sensor_data.get('ph',    state['ph'])
@@ -198,6 +223,11 @@ def uart_thread():
                         state['arduino_ok'] = True
                         state['arduino_status'] = 'ok'
                         state['arduino_error'] = ''
+                    
+                    # Inject Garmin GPS into Pixhawk
+                    if pixhawk and pixhawk.connected:
+                        pixhawk.send_gps_input(state['garmin_lat'], state['garmin_lon'])
+                        log.debug(f"[UART->PIX] Sent Garmin GPS: {state['garmin_lat']:.6f}, {state['garmin_lon']:.6f}")
                     
                     sampler.add_sample(sensor_data)
                     log.debug(f"[UART] Lat={sensor_data['lat']:.4f}, Lon={sensor_data['lon']:.4f}")
@@ -303,8 +333,40 @@ def pixhawk_thread():
             if data:
                 with lock:
                     if 'lat' in data:
+                        state['pixhawk_lat'] = data['lat']
+                        state['pixhawk_lon'] = data['lon']
+                        
+                        # Primary display position comes from Pixhawk's EKF/Fused GPS
                         state['lat'] = data['lat']
                         state['lon'] = data['lon']
+                        
+                        # Status Logic:
+                        # Red: Both zero
+                        # Blinking Orange: Garmin zero
+                        # Yellow: Distance >= 10m
+                        # Green: Distance < 10m
+                        
+                        garmin_no_fix = (state['garmin_lat'] == 0 and state['garmin_lon'] == 0)
+                        pixhawk_no_fix = (state['pixhawk_lat'] == 0 and state['pixhawk_lon'] == 0)
+                        
+                        if garmin_no_fix and pixhawk_no_fix:
+                            state['gps_status'] = 'no_fix' # Red
+                            state['gps_match'] = False
+                        elif garmin_no_fix:
+                            state['gps_status'] = 'no_garmin' # Blinking Orange
+                            state['gps_match'] = False
+                        else:
+                            dist = haversine_distance(
+                                state['pixhawk_lat'], state['pixhawk_lon'],
+                                state['garmin_lat'], state['garmin_lon']
+                            )
+                            state['gps_error_m'] = round(dist, 2)
+                            state['gps_match'] = (dist < 10.0)
+                            state['gps_status'] = 'ok' if state['gps_match'] else 'warn' # Green or Yellow
+                            
+                            if not state['gps_match']:
+                                log.warning(f"[GPS] Mismatch detected: {dist:.1f}m difference!")
+                    
                     if 'roll' in data:
                         state['roll'] = data['roll']
                         state['pitch'] = data['pitch']
@@ -443,8 +505,32 @@ def sim_thread():
     while True:
         t += 1
         with lock:
-            state['lat']       = 13.7563 + (t * 0.0001)
-            state['lon']       = 100.5018 + (t * 0.0001)
+            state['garmin_lat'] = 13.7563 + (t * 0.0001)
+            state['garmin_lon'] = 100.5018 + (t * 0.0001)
+            
+            # Pixhawk GPS with a small random error
+            err = math.sin(t * 0.2) * 0.00005
+            state['pixhawk_lat'] = state['garmin_lat'] + err
+            state['pixhawk_lon'] = state['garmin_lon'] + err
+            
+            state['lat']       = state['pixhawk_lat']
+            state['lon']       = state['pixhawk_lon']
+            
+            garmin_no_fix = (state['garmin_lat'] == 0 and state['garmin_lon'] == 0)
+            pixhawk_no_fix = (state['pixhawk_lat'] == 0 and state['pixhawk_lon'] == 0)
+            
+            if garmin_no_fix and pixhawk_no_fix:
+                state['gps_status'] = 'no_fix'
+                state['gps_match'] = False
+            elif garmin_no_fix:
+                state['gps_status'] = 'no_garmin'
+                state['gps_match'] = False
+            else:
+                dist = haversine_distance(state['pixhawk_lat'], state['pixhawk_lon'], state['garmin_lat'], state['garmin_lon'])
+                state['gps_error_m'] = round(dist, 2)
+                state['gps_match'] = (dist < 10.0)
+                state['gps_status'] = 'ok' if state['gps_match'] else 'warn'
+
             state['depth']     = round(2.0 + math.sin(t * 0.1) * 1.5, 2)
             state['ph']        = round(7.0 + math.sin(t * 0.05) * 0.4, 2)
             state['do']        = round(6.5 + math.sin(t * 0.08) * 1.0, 2)

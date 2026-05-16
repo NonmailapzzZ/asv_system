@@ -219,11 +219,30 @@ button {
   animation: statusBlink .55s ease-in-out infinite;
 }
 
-.dot.arduino-error,
-.dot.arduino-idle {
+.dot.gps-ok {
+  background: var(--green);
+  box-shadow: 0 0 10px rgba(39, 214, 147, .75);
+}
+
+.dot.gps-warn {
+  background: var(--amber);
+  box-shadow: 0 0 10px rgba(242, 180, 75, .75);
+}
+
+.dot.gps-no-garmin {
+  background: #ff8c00; /* Orange */
+  box-shadow: 0 0 12px rgba(255, 140, 0, .8);
+  animation: gpsBlink .6s ease-in-out infinite;
+}
+
+.dot.gps-no-fix {
   background: var(--danger);
   box-shadow: 0 0 10px rgba(255, 93, 93, .72);
 }
+
+@keyframes gpsBlink {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.2; transform: scale(0.8); }
 }
 
 #clock {

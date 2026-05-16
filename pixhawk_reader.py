@@ -219,6 +219,43 @@ class PixhawkReader:
         except Exception as e:
             log.error(f"[PIXHAWK] Send command error: {e}")
             return False
+
+    def send_gps_input(self, lat, lon, alt=0, fix_type=3, satellites=10):
+        """
+        Send external GPS data to Pixhawk (GPS_INPUT #232)
+        Note: ArduPilot needs GPS_TYPE=14 (MAV) or similar.
+        """
+        if not self.connected:
+            return False
+        
+        try:
+            # time_usec is usually since boot or epoch
+            time_usec = int(time.time() * 1e6)
+            
+            self.master.mav.gps_input_send(
+                time_usec,       # Timestamp (micros since boot or UNIX epoch)
+                0,               # ID of the GPS for multiple GPS systems
+                0,               # Flags indicating which fields to ignore (0 = use all)
+                0,               # GPS week number
+                0,               # Time of week
+                fix_type,        # 0-1: no fix, 2: 2D fix, 3: 3D fix
+                int(lat * 1e7),  # Latitude (WGS84), in degrees * 1E7
+                int(lon * 1e7),  # Longitude (WGS84), in degrees * 1E7
+                alt,             # Altitude (MSL), in meters
+                1.0,             # HDOP
+                1.0,             # VDOP
+                0,               # velocity north
+                0,               # velocity east
+                0,               # velocity down
+                0.1,             # speed accuracy
+                0.1,             # horizontal accuracy
+                0.1,             # vertical accuracy
+                satellites       # Number of satellites visible
+            )
+            return True
+        except Exception as e:
+            log.error(f"[PIXHAWK] Send GPS input error: {e}")
+            return False
     
     def set_mode(self, mode_name):
         """
