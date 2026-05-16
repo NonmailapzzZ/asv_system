@@ -131,17 +131,34 @@ class PixhawkReader:
             log.error(f"[PIXHAWK] Read mode error: {e}")
             return None
     
-    def read_mission_current(self):
-        """Read current mission item sequence number."""
+    def read_mission_status(self):
+        """
+        Read mission-related messages.
+        
+        Returns:
+            dict: {
+                'mission_current': int,
+                'mission_reached': int (optional)
+            }
+        """
         if not self.connected:
             return None
+        
+        data = {}
         try:
-            msg = self.master.recv_match(type='MISSION_CURRENT', blocking=False)
-            if msg:
-                return {'mission_item': msg.seq}
-            return None
+            # Check for MISSION_CURRENT (the item the boat is currently heading to)
+            msg_curr = self.master.recv_match(type='MISSION_CURRENT', blocking=False)
+            if msg_curr:
+                data['mission_current'] = msg_curr.seq
+            
+            # Check for MISSION_ITEM_REACHED (the item just completed/arrived at)
+            msg_reached = self.master.recv_match(type='MISSION_ITEM_REACHED', blocking=False)
+            if msg_reached:
+                data['mission_reached'] = msg_reached.seq
+                
+            return data if data else None
         except Exception as e:
-            log.error(f"[PIXHAWK] Read mission item error: {e}")
+            log.error(f"[PIXHAWK] Read mission status error: {e}")
             return None
     
     def read_all(self):
@@ -169,7 +186,7 @@ class PixhawkReader:
         if bat:
             data.update(bat)
 
-        mis = self.read_mission_current()
+        mis = self.read_mission_status()
         if mis:
             data.update(mis)
         
