@@ -72,6 +72,7 @@ state = {
     'sampling_progress': 0,
     'sampling_samples': 0,
     'sampling_remaining': 0,
+    'mission_item': 0,
     'ts': '',
 }
 
@@ -311,23 +312,33 @@ def pixhawk_thread():
                     if 'voltage' in data:
                         state['battery_voltage'] = data['voltage']
                         state['battery_remaining'] = data['remaining']
-                    if 'mode' in data:
-                        if not delay_active:
-                            state['pixhawk_mode'] = data['mode']
+                    if 'mission_item' in data:
+                        if state.get('mission_item') != data['mission_item']:
+                            log.info(f"[PIXHAWK] Mission item changed to #{data['mission_item']}")
+                            state['mission_item'] = data['mission_item']
+                            loiter_active = False # Allow re-trigger if next item is also LOITER
+                    if 'mode' in data and not delay_active:
+                        state['pixhawk_mode'] = data['mode']
                     state['pixhawk_ok'] = True
 
-                mode = data.get('mode', '').upper()
-                if mode == 'LOITER' and not loiter_active and not sampler.get_status()['active']:
-                    log.info("[PIXHAWK] LOITER detected, starting auto sampling")
-                    if active_session_id is None:
-                        begin_operation_session(source='pixhawk_loiter')
-                    sampler.start_sampling(DEFAULT_AUTO_SAMPLING_SECONDS)
-                    loiter_active = True
-                    update_sampling_state()
-                elif mode != 'LOITER':
-                    loiter_active = False
+                # Process flight mode for auto-sampling
+                if 'mode' in data:
+                    mode = data['mode'].upper()
+                    
+                    if mode == 'LOITER':
+                        if not loiter_active and not sampler.get_status()['active']:
+                            log.info("[PIXHAWK] LOITER mode detected, starting auto sampling")
+                            if active_session_id is None:
+                                begin_operation_session(source='pixhawk_loiter')
+                            sampler.start_sampling(DEFAULT_AUTO_SAMPLING_SECONDS)
+                            loiter_active = True
+                            update_sampling_state()
+                    else:
+                        if loiter_active:
+                            log.info(f"[PIXHAWK] Left LOITER mode (now {mode})")
+                        loiter_active = False
             
-            # Detect Delay command
+            # Detect Delay/Loiter commands from MAVLink messages
             try:
                 msg = pixhawk.master.recv_match(
                     type=['COMMAND_LONG', 'COMMAND_ACK'],
@@ -339,11 +350,25 @@ def pixhawk_thread():
                     msg_type = msg.get_type()
                     
                     if msg_type == 'COMMAND_LONG':
-                        if msg.command == 184:
-                            duration = int(msg.param2) if int(msg.param2) > 0 else DEFAULT_AUTO_SAMPLING_SECONDS
-                            log.info(f"[PIXHAWK] Delay detected: {duration}s")
+                        # Handle various delay/loiter commands
+                        # 93: MAV_CMD_NAV_DELAY
+                        # 19: MAV_CMD_NAV_LOITER_TIME
+                        # 184: MAV_CMD_DO_REPEAT_SERVO (often used as custom trigger)
+                        if msg.command in [93, 19, 184]:
+                            duration = DEFAULT_AUTO_SAMPLING_SECONDS
+                            if msg.command == 93:
+                                duration = int(msg.param1) if int(msg.param1) > 0 else duration
+                                log.info(f"[PIXHAWK] NAV_DELAY detected: {duration}s")
+                            elif msg.command == 19:
+                                duration = int(msg.param1) if int(msg.param1) > 0 else duration
+                                log.info(f"[PIXHAWK] NAV_LOITER_TIME detected: {duration}s")
+                            elif msg.command == 184:
+                                duration = int(msg.param2) if int(msg.param2) > 0 else duration
+                                log.info(f"[PIXHAWK] DO_REPEAT_SERVO (Delay) detected: {duration}s")
+                            
                             if active_session_id is None:
-                                begin_operation_session(source='pixhawk_delay')
+                                begin_operation_session(source='pixhawk_auto')
+                            
                             if not sampler.get_status()['active']:
                                 sampler.start_sampling(duration)
                                 delay_active = True
@@ -353,9 +378,9 @@ def pixhawk_thread():
                                 update_sampling_state()
                     
                     elif msg_type == 'COMMAND_ACK':
-                        if msg.command == 184 and delay_active:
-                            log.info("[PIXHAWK] Delay ended")
-                            finish_sampling(reason='pixhawk_delay_ack')
+                        if msg.command in [93, 19, 184] and delay_active:
+                            log.info(f"[PIXHAWK] Command {msg.command} finished/ACKed")
+                            finish_sampling(reason='pixhawk_ack')
                             delay_active = False
                             with lock:
                                 state['pixhawk_mode'] = mode_before_delay

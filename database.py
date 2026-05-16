@@ -52,6 +52,7 @@ def init_db():
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS operation_sessions (
+            
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             started_at TEXT NOT NULL,
             label TEXT,

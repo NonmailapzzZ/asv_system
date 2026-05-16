@@ -131,9 +131,22 @@ class PixhawkReader:
             log.error(f"[PIXHAWK] Read mode error: {e}")
             return None
     
+    def read_mission_current(self):
+        """Read current mission item sequence number."""
+        if not self.connected:
+            return None
+        try:
+            msg = self.master.recv_match(type='MISSION_CURRENT', blocking=False)
+            if msg:
+                return {'mission_item': msg.seq}
+            return None
+        except Exception as e:
+            log.error(f"[PIXHAWK] Read mission item error: {e}")
+            return None
+    
     def read_all(self):
         """
-        อ่านข้อมูลทั้งหมด (GPS + Attitude + Battery)
+        อ่านข้อมูลทั้งหมด (GPS + Attitude + Battery + Mode + Mission)
         
         Returns:
             dict: combined data
@@ -155,6 +168,10 @@ class PixhawkReader:
         bat = self.read_battery()
         if bat:
             data.update(bat)
+
+        mis = self.read_mission_current()
+        if mis:
+            data.update(mis)
         
         return data if data else None
     
