@@ -78,6 +78,7 @@ state = {
     'sampling_samples': 0,
     'sampling_remaining': 0,
     'mission_item': 0,
+    'mission_item_triggered': False,
     'ts': '',
 }
 
@@ -383,21 +384,54 @@ def pixhawk_thread():
                 if 'mode' in data:
                     mode = data['mode'].upper()
                     
-                    # Track mission progression to allow re-triggering on same mode (e.g. consecutive LOITER waypoints)
+                    # Track mission progression
                     mission_curr = data.get('mission_current', -1)
-                    mission_reached = data.get('mission_reached', -1)
                     
                     with lock:
                         if state.get('mission_item') != mission_curr and mission_curr != -1:
                             log.info(f"[PIXHAWK] New mission item: #{mission_curr}")
                             state['mission_item'] = mission_curr
-                            # Reset loiter_active so if this new item is also a LOITER, it triggers again
-                            loiter_active = False
+                            # Reset trigger flag when waypoint changes
+                            mission_item_triggered = False
+                        else:
+                            mission_item_triggered = state.get('mission_item_triggered', False)
+
+                        # If in AUTO mode, check if the current mission command requires sampling
+                        if mode == 'AUTO':
+                            cmd_id = pixhawk.get_mission_command(mission_curr)
+                            # 93: NAV_DELAY, 19: LOITER_TIME, 17: LOITER_UNLIM, 18: LOITER_TURNS
+                            if cmd_id in [93, 19, 17, 18]:
+                                # Start sampling if not already active and not already triggered for this WP
+                                if not sampler.get_status()['active'] and not mission_item_triggered:
+                                    log.info(f"[PIXHAWK] AUTO Mission Command {cmd_id} at WP {mission_curr} detected, starting auto sampling")
+                                    if active_session_id is None:
+                                        begin_operation_session(source=f'pixhawk_auto_cmd_{cmd_id}')
+                                    sampler.start_sampling(DEFAULT_AUTO_SAMPLING_SECONDS)
+                                    delay_active = True
+                                    state['mission_item_triggered'] = True
+                                    state['pixhawk_mode'] = f'AUTO:{cmd_id}'
+                                elif sampler.get_status()['active'] and delay_active:
+                                    # Still sampling, keep the mode display
+                                    state['pixhawk_mode'] = f'AUTO:{cmd_id}'
+                            else:
+                                # Normal WP - stop sampling if it was triggered by an AUTO command
+                                if delay_active:
+                                    log.info(f"[PIXHAWK] Moving to WP {mission_curr} (Cmd {cmd_id}), stopping mission sampling")
+                                    finish_sampling(reason='mission_next')
+                                    delay_active = False
+                                    state['mission_item_triggered'] = False
+                        else:
+                            # Left AUTO mode - stop sampling if it was triggered by an AUTO command
+                            if delay_active:
+                                log.info(f"[PIXHAWK] Left AUTO mode (now {mode}), stopping mission sampling")
+                                finish_sampling(reason='mode_change')
+                                delay_active = False
+                                state['mission_item_triggered'] = False
                         
                         if not delay_active:
                             state['pixhawk_mode'] = mode
                     
-                    # 1. Automatic Sampling via LOITER Mode (Flight Mode)
+                    # 1. Automatic Sampling via Manual LOITER Mode (Flight Mode)
                     if mode == 'LOITER':
                         if not loiter_active and not sampler.get_status()['active']:
                             log.info("[PIXHAWK] LOITER mode detected, starting auto sampling")
@@ -409,51 +443,42 @@ def pixhawk_thread():
                     else:
                         if loiter_active:
                             log.info(f"[PIXHAWK] Left LOITER mode (now {mode})")
+                            if sampler.get_status()['active']:
+                                finish_sampling(reason='mode_change')
                         loiter_active = False
             
-            # 2. Automatic Sampling via Mission Commands (Delay/Loiter Time)
-            # These are caught via COMMAND_LONG messages which ArduPilot broadcasts when executing mission items
+            # 2. Automatic Sampling via Manual COMMAND_LONG (Manual triggers/Simulation)
+            # Useful for manual testing or when receiving triggers outside of a mission
             try:
+                # We only check for COMMAND_LONG (trigger start)
+                # We rely on the timer in app.py or sampler itself to stop it, or a mode change
                 msg = pixhawk.master.recv_match(
-                    type=['COMMAND_LONG', 'COMMAND_ACK'],
+                    type=['COMMAND_LONG'],
                     blocking=False,
-                    timeout=0.1
+                    timeout=0.01
                 )
                 
                 if msg:
-                    msg_type = msg.get_type()
-                    
-                    if msg_type == 'COMMAND_LONG':
-                        # 93: MAV_CMD_NAV_DELAY
-                        # 19: MAV_CMD_NAV_LOITER_TIME
-                        # 184: MAV_CMD_DO_REPEAT_SERVO (Common custom trigger)
-                        if msg.command in [93, 19, 184]:
-                            # param1 for 93/19 is usually time, param2 for 184
-                            duration = DEFAULT_AUTO_SAMPLING_SECONDS
-                            if msg.command == 184:
-                                duration = int(msg.param2) if int(msg.param2) > 0 else duration
-                            else:
-                                duration = int(msg.param1) if int(msg.param1) > 0 else duration
-                                
-                            log.info(f"[PIXHAWK] Mission Command {msg.command} detected: {duration}s")
+                    # 93: MAV_CMD_NAV_DELAY
+                    # 19: MAV_CMD_NAV_LOITER_TIME
+                    # 184: MAV_CMD_DO_REPEAT_SERVO (Common custom trigger)
+                    if msg.command in [93, 19, 184]:
+                        # param1 for 93/19 is usually time, param2 for 184
+                        duration = DEFAULT_AUTO_SAMPLING_SECONDS
+                        if msg.command == 184:
+                            duration = int(msg.param2) if int(msg.param2) > 0 else duration
+                        else:
+                            duration = int(msg.param1) if int(msg.param1) > 0 else duration
                             
-                            if not sampler.get_status()['active']:
-                                if active_session_id is None:
-                                    begin_operation_session(source=f'pixhawk_cmd_{msg.command}')
-                                sampler.start_sampling(duration)
-                                delay_active = True
-                                with lock:
-                                    mode_before_delay = state.get('pixhawk_mode', 'UNKNOWN')
-                                    state['pixhawk_mode'] = 'DELAY'
-                                update_sampling_state()
-                    
-                    elif msg_type == 'COMMAND_ACK':
-                        if msg.command in [93, 19, 184] and delay_active:
-                            log.info(f"[PIXHAWK] Command {msg.command} finished/ACKed")
-                            finish_sampling(reason='pixhawk_ack')
-                            delay_active = False
-                            with lock:
-                                state['pixhawk_mode'] = mode_before_delay
+                        log.info(f"[PIXHAWK] External Command {msg.command} detected: {duration}s")
+                        
+                        if not sampler.get_status()['active']:
+                            if active_session_id is None:
+                                begin_operation_session(source=f'pixhawk_cmd_{msg.command}')
+                            sampler.start_sampling(duration)
+                            # Only set delay_active if we want it to be cleared by mission/mode logic
+                            # For manual command, we let it run its course
+                            update_sampling_state()
             
             except Exception as e:
                 log.debug(f"[PIXHAWK] Message processing error: {e}")
@@ -767,9 +792,22 @@ def upload_mission():
     
     try:
         waypoints = mm.parse_waypoints_file(path)
-        return jsonify({'ok': True, 'msg': f'Upload สำเร็จ {len(waypoints)} waypoints'})
+        
+        # Actually upload to Pixhawk if connected
+        if pixhawk and pixhawk.connected:
+            log.info(f"[API] Uploading {len(waypoints)} waypoints to Pixhawk...")
+            mm.upload_mission(pixhawk.master, waypoints)
+            
+            # Refresh the mission cache for AUTO mode sampling
+            pixhawk.download_mission()
+            
+            return jsonify({'ok': True, 'msg': f'Upload และบันทึกลง Pixhawk สำเร็จ ({len(waypoints)} waypoints)'})
+        else:
+            return jsonify({'ok': True, 'msg': f'Upload ไฟล์สำเร็จ ({len(waypoints)} waypoints) แต่ Pixhawk ไม่ได้เชื่อมต่อ'}), 200
+            
     except Exception as e:
-        return jsonify({'ok': False, 'msg': str(e)}), 500
+        log.error(f"[API] Mission upload failed: {e}")
+        return jsonify({'ok': False, 'msg': f'Upload ล้มเหลว: {str(e)}'}), 500
 
 @app.route('/api/start_mission', methods=['POST'])
 def start_mission():

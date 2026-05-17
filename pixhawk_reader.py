@@ -2,6 +2,11 @@
 pixhawk_reader.py — RPi อ่านข้อมูล Pixhawk
 """
 
+import os
+
+# Force MAVLink 2.0
+os.environ['MAVLINK20'] = '1'
+
 from pymavlink import mavutil
 import time
 import logging
@@ -9,25 +14,112 @@ import logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+# ArduRover/ArduBoat Mode Mapping (Standard)
+ROVER_MODES = {
+    0: 'MANUAL',
+    1: 'ACRO',
+    3: 'STEERING',
+    4: 'HOLD',
+    5: 'LOITER',
+    6: 'FOLLOW',
+    7: 'SIMPLE',
+    10: 'AUTO',
+    11: 'RTL',
+    12: 'SMART_RTL',
+    14: 'GUIDED',
+    15: 'INITIALIZING'
+}
 
 class PixhawkReader:
     def __init__(self, port='/dev/ttyACM0', baud=115200):
         """
         เชื่อมต่อกับ Pixhawk
-        
-        Args:
-            port: Serial port (/dev/ttyACM0 สำหรับ USB, /dev/ttyS0 สำหรับ UART)
-            baud: Baud rate (115200 ปกติสำหรับ USB, 57600 สำหรับ TELEM1)
         """
+        self.port = port
+        self.baud = baud
+        self.master = None
+        self.connected = False
+        self.mission_items = {} # Cached mission {seq: command_id}
+        self.connect()
+
+    def connect(self):
         try:
-            self.master = mavutil.mavlink_connection(port, baud=baud)
+            self.master = mavutil.mavlink_connection(self.port, baud=self.baud)
             self.master.wait_heartbeat(timeout=10)
-            log.info(f"[PIXHAWK] Connected to {port} at {baud} baud")
+            log.info(f"[PIXHAWK] Connected to {self.port} at {self.baud} baud")
             self.connected = True
+            
+            # Request mission items after connection
+            self.download_mission()
+            return True
         except Exception as e:
             log.error(f"[PIXHAWK] Cannot connect: {e}")
             self.connected = False
-            self.master = None
+            return False
+
+    def download_mission(self):
+        """Download mission list from Pixhawk to identify Delay/Loiter commands."""
+        if not self.connected:
+            return False
+        
+        try:
+            log.info("[PIXHAWK] Downloading mission...")
+            self.master.mav.mission_request_list_send(self.master.target_system, self.master.target_component)
+            
+            msg = self.master.recv_match(type='MISSION_COUNT', blocking=True, timeout=5)
+            if not msg:
+                log.warning("[PIXHAWK] No MISSION_COUNT received during download")
+                return False
+            
+            count = msg.count
+            self.mission_items = {}
+            
+            for i in range(count):
+                self.master.mav.mission_request_int_send(
+                    self.master.target_system, self.master.target_component, i
+                )
+                item = self.master.recv_match(type=['MISSION_ITEM_INT', 'MISSION_ITEM'], blocking=True, timeout=2)
+                if item:
+                    self.mission_items[item.seq] = item.command
+                else:
+                    log.warning(f"[PIXHAWK] Failed to get mission item #{i}")
+            
+            log.info(f"[PIXHAWK] Mission downloaded: {len(self.mission_items)} items")
+            return True
+        except Exception as e:
+            log.error(f"[PIXHAWK] Mission download error: {e}")
+            return False
+
+    def get_mission_command(self, seq):
+        """Return the command ID for a given mission sequence number."""
+        return self.mission_items.get(seq)
+
+    def read_mode(self):
+        """Read Pixhawk flight mode from MAVLink HEARTBEAT."""
+        if not self.connected:
+            return None
+
+        try:
+            msg = self.master.recv_match(type='HEARTBEAT', blocking=False)
+            if msg:
+                # Custom robust mapping for Rover/Boat
+                mode_id = msg.custom_mode
+                mode_name = ROVER_MODES.get(mode_id)
+                
+                if mode_name:
+                    return {'mode': mode_name}
+                
+                # Fallback to library mapping but strip "MODE" prefix
+                mode_str = mavutil.mode_string_v10(msg)
+                if mode_str:
+                    mode_str = mode_str.upper().replace('MODE', '').replace('(', '').replace(')', '').strip()
+                    return {'mode': mode_str}
+                
+                return {'mode': f'UNKNOWN({mode_id})'}
+            return None
+        except Exception as e:
+            log.error(f"[PIXHAWK] Read mode error: {e}")
+            return None
     
     def read_gps(self):
         """
@@ -110,25 +202,6 @@ class PixhawkReader:
             return None
         except Exception as e:
             log.error(f"[PIXHAWK] Read battery error: {e}")
-            return None
-
-    def read_mode(self):
-        """Read Pixhawk flight mode from MAVLink HEARTBEAT."""
-        if not self.connected:
-            return None
-
-        try:
-            msg = self.master.recv_match(
-                type='HEARTBEAT',
-                blocking=False
-            )
-
-            if msg:
-                mode = mavutil.mode_string_v10(msg)
-                return {'mode': mode.upper() if mode else 'UNKNOWN'}
-            return None
-        except Exception as e:
-            log.error(f"[PIXHAWK] Read mode error: {e}")
             return None
     
     def read_mission_status(self):
