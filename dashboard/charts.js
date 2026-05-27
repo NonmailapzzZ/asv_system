@@ -102,3 +102,16 @@ export function loadHistory(records) {
   phChart.update();
   doChart.update();
 }
+
+export function setTheme(isLight) {
+  const textColor = isLight ? '#5a6a7a' : '#4a7a85';
+  const gridColor = isLight ? 'rgba(0,0,0,0.05)' : 'rgba(0,200,255,0.05)';
+
+  [depthChart, phChart, doChart].forEach(chart => {
+    chart.options.scales.x.ticks.color = textColor;
+    chart.options.scales.x.grid.color = gridColor;
+    chart.options.scales.y.ticks.color = textColor;
+    chart.options.scales.y.grid.color = gridColor;
+    chart.update();
+  });
+}

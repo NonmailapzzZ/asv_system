@@ -23,6 +23,8 @@
       </div>
     </div>
     <div class="hdr-right">
+      <button id="theme-toggle" class="btn btn-primary" style="width:auto;margin:0;padding:5px 10px;font-size:10px">Theme</button>
+      <div class="conn-badge" id="cmd-badge" style="display:none"><span style="color:var(--faint);margin-right:4px">CMD</span><span id="lbl-cmd">--</span></div>
       <div class="conn-badge"><div class="dot" id="dot-px"></div><span id="lbl-px">PIXHAWK</span></div>
       <div class="mode-badge" id="pixhawk-mode">MODE --</div>
       <div class="conn-badge"><div class="dot" id="dot-ar"></div><span id="lbl-ar">ARDUINO</span></div>
@@ -33,11 +35,11 @@
   <!-- GAUGES -->
   <div class="gauges">
     <div class="g-card" style="--c:var(--accent)">
-      <div class="g-lbl">Latitude</div>
+      <div class="g-lbl">Lat (Pixhawk)</div>
       <div class="g-val" id="v-lat">--<span class="g-unit">°</span></div>
     </div>
     <div class="g-card" style="--c:var(--accent)">
-      <div class="g-lbl">Longitude</div>
+      <div class="g-lbl">Lon (Pixhawk)</div>
       <div class="g-val" id="v-lon">--<span class="g-unit">°</span></div>
     </div>
     <div class="g-card" style="--c:var(--accent)">
@@ -79,7 +81,7 @@
 
     <div id="cam-body">
       <div id="cam-status" style="font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:8px;min-height:16px"></div>
-      <div id="cam-view" style="background:#050c13;border:1px solid var(--border);border-radius:8px;overflow:hidden;position:relative;text-align:center;min-height:240px;display:flex;align-items:center;justify-content:center">
+      <div id="cam-view" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden;position:relative;text-align:center;min-height:240px;display:flex;align-items:center;justify-content:center">
         <div id="cam-placeholder" style="color:var(--muted);font-family:'Share Tech Mono',monospace;font-size:12px">
           กด Scan แล้วเลือกกล้อง จากนั้นกด Open
         </div>
@@ -248,7 +250,23 @@ loadOperationSessions();
 
 
 <script type="module">
-  import { pushPoint, loadHistory } from '{{ url_for("static", filename="charts.js") }}';
+  import { pushPoint, loadHistory, setTheme } from '{{ url_for("static", filename="charts.js") }}';
+
+// Theme Toggle
+const themeToggle = document.getElementById('theme-toggle');
+let isLight = localStorage.getItem('theme') === 'light';
+if (isLight) {
+  document.body.classList.add('light-theme');
+  // Wait a bit for charts to initialize
+  setTimeout(() => setTheme(true), 100);
+}
+
+themeToggle.addEventListener('click', () => {
+  isLight = !isLight;
+  document.body.classList.toggle('light-theme', isLight);
+  localStorage.setItem('theme', isLight ? 'light' : 'dark');
+  setTheme(isLight);
+});
 
 // Clock
 setInterval(() => {
@@ -422,6 +440,13 @@ socket.on('sensor_update', d => {
   
   setArduinoStatus(d.arduino_status, d.arduino_error);
   setPixhawkMode(d.pixhawk_mode);
+
+  if (d.pixhawk_command) {
+    document.getElementById('cmd-badge').style.display = 'flex';
+    document.getElementById('lbl-cmd').textContent = d.pixhawk_command + (d.mission_wp ? ` #${d.mission_wp}` : '');
+  } else {
+    document.getElementById('cmd-badge').style.display = 'none';
+  }
 
   document.getElementById('map-link').href = `https://www.google.com/maps?q=${d.lat},${d.lon}`;
 

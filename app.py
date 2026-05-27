@@ -38,10 +38,22 @@ UART_BAUD       = 9600
 PIXHAWK_PORT    = '/dev/ttyACM0'
 PIXHAWK_BAUD    = 115200
 FUSION_INTERVAL = 2.0
-USE_SIM         = False
+USE_SIM         = True
 USE_PIXHAWK     = True
 DEFAULT_AUTO_SAMPLING_SECONDS = 30
 UART_STALE_SECONDS = 3.0
+
+MAV_CMD_NAMES = {
+    16: "WAYPOINT",
+    17: "LOITER_UNLIM",
+    18: "LOITER_TURNS",
+    19: "LOITER_TIME",
+    20: "RTL",
+    21: "LAND",
+    22: "TAKEOFF",
+    93: "DELAY",
+    184: "DO_REPEAT_SERVO"
+}
 
 now_thailand = datetime.utcnow() + timedelta(hours=7)
 
@@ -73,6 +85,8 @@ state = {
     'battery_remaining': 0.0,
     'pixhawk_ok': False,
     'pixhawk_mode': 'DISCONNECTED',
+    'pixhawk_command': '',
+    'mission_wp': 0,
     'sampling_active': False,
     'sampling_progress': 0,
     'sampling_samples': 0,
@@ -212,9 +226,8 @@ def uart_thread():
                         state['garmin_lat'] = sensor_data.get('lat', 0.0)
                         state['garmin_lon'] = sensor_data.get('lon', 0.0)
                         
-                        # Use Garmin as primary lat/lon if Pixhawk not available or for sensor consistency
-                        state['lat']   = state['garmin_lat']
-                        state['lon']   = state['garmin_lon']
+                        # Use Pixhawk ONLY as primary. Garmin is just for reference/injection.
+                        # (Removed fallback logic here)
                         
                         state['depth'] = sensor_data.get('depth', state['depth'])
                         state['temp']  = sensor_data.get('temp',  state['temp'])
@@ -230,6 +243,13 @@ def uart_thread():
                         pixhawk.send_gps_input(state['garmin_lat'], state['garmin_lon'])
                         log.debug(f"[UART->PIX] Sent Garmin GPS: {state['garmin_lat']:.6f}, {state['garmin_lon']:.6f}")
                     
+                    # Update sampler with the best available GPS (Pixhawk preferred)
+                    with lock:
+                        pixhawk_no_fix = (state['pixhawk_lat'] == 0 and state['pixhawk_lon'] == 0)
+                        if state.get('pixhawk_ok', False) and not pixhawk_no_fix:
+                            sensor_data['lat'] = state['pixhawk_lat']
+                            sensor_data['lon'] = state['pixhawk_lon']
+
                     sampler.add_sample(sensor_data)
                     log.debug(f"[UART] Lat={sensor_data['lat']:.4f}, Lon={sensor_data['lon']:.4f}")
                 elif reader_status == 'warn':
@@ -338,8 +358,11 @@ def pixhawk_thread():
                         state['pixhawk_lon'] = data['lon']
                         
                         # Primary display position comes from Pixhawk's EKF/Fused GPS
-                        state['lat'] = data['lat']
-                        state['lon'] = data['lon']
+                        # Only update if Pixhawk actually has a fix
+                        pixhawk_no_fix = (data['lat'] == 0 and data['lon'] == 0)
+                        if not pixhawk_no_fix:
+                            state['lat'] = data['lat']
+                            state['lon'] = data['lon']
                         
                         # Status Logic:
                         # Red: Both zero
@@ -379,6 +402,7 @@ def pixhawk_thread():
                         if state.get('mission_item') != data['mission_item']:
                             log.info(f"[PIXHAWK] Mission item changed to #{data['mission_item']}")
                             state['mission_item'] = data['mission_item']
+                            state['mission_wp'] = data['mission_item']
                             loiter_active = False # Allow re-trigger if next item is also LOITER
                 # Process flight mode and mission status
                 if 'mode' in data:
@@ -391,6 +415,7 @@ def pixhawk_thread():
                         if state.get('mission_item') != mission_curr and mission_curr != -1:
                             log.info(f"[PIXHAWK] New mission item: #{mission_curr}")
                             state['mission_item'] = mission_curr
+                            state['mission_wp'] = mission_curr
                             # Reset trigger flag when waypoint changes
                             mission_item_triggered = False
                         else:
@@ -399,6 +424,7 @@ def pixhawk_thread():
                         # If in AUTO mode, check if the current mission command requires sampling
                         if mode == 'AUTO':
                             cmd_id = pixhawk.get_mission_command(mission_curr)
+                            state['pixhawk_command'] = MAV_CMD_NAMES.get(cmd_id, f"CMD:{cmd_id}") if cmd_id else "AUTO"
                             # 93: NAV_DELAY, 19: LOITER_TIME, 17: LOITER_UNLIM, 18: LOITER_TURNS
                             if cmd_id in [93, 19, 17, 18]:
                                 # Start sampling if not already active and not already triggered for this WP
@@ -409,10 +435,8 @@ def pixhawk_thread():
                                     sampler.start_sampling(DEFAULT_AUTO_SAMPLING_SECONDS)
                                     delay_active = True
                                     state['mission_item_triggered'] = True
-                                    state['pixhawk_mode'] = f'AUTO:{cmd_id}'
                                 elif sampler.get_status()['active'] and delay_active:
-                                    # Still sampling, keep the mode display
-                                    state['pixhawk_mode'] = f'AUTO:{cmd_id}'
+                                    pass
                             else:
                                 # Normal WP - stop sampling if it was triggered by an AUTO command
                                 if delay_active:
@@ -421,6 +445,7 @@ def pixhawk_thread():
                                     delay_active = False
                                     state['mission_item_triggered'] = False
                         else:
+                            state['pixhawk_command'] = ''
                             # Left AUTO mode - stop sampling if it was triggered by an AUTO command
                             if delay_active:
                                 log.info(f"[PIXHAWK] Left AUTO mode (now {mode}), stopping mission sampling")
@@ -428,8 +453,7 @@ def pixhawk_thread():
                                 delay_active = False
                                 state['mission_item_triggered'] = False
                         
-                        if not delay_active:
-                            state['pixhawk_mode'] = mode
+                        state['pixhawk_mode'] = mode
                     
                     # 1. Automatic Sampling via Manual LOITER Mode (Flight Mode)
                     if mode == 'LOITER':
@@ -565,6 +589,8 @@ def sim_thread():
             state['arduino_status'] = 'ok'
             state['arduino_error'] = ''
             state['pixhawk_mode'] = 'SIM'
+            state['pixhawk_command'] = 'DELAY' if t % 20 < 5 else ''
+            state['mission_wp'] = (t // 20) % 5 + 1
             state['ts']        = now_thailand.strftime('%H:%M:%S')
 
         socketio.emit('sensor_update', dict(state))
